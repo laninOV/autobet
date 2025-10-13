@@ -1,0 +1,32 @@
+.tsx-copy-btn {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647; /* on top */
+  background: #0d6efd;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+
+.tsx-copy-btn:hover {
+  background: #0b5ed7;
+}
+
+.tsx-copy-btn:active {
+  transform: translateY(1px);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tsx-copy-btn {
+    background: #2563eb;
+    color: #e5e7eb;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.6);
+  }
+  .tsx-copy-btn:hover { background: #1d4ed8; }
+}

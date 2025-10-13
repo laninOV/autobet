@@ -1,0 +1,18 @@
+/* Minimal polish for the betcity theme */
+
+:root.minimal {
+  --main-shadow: 0 6px 18px rgba(43, 53, 130, 0.08);
+  /* Updated card background to rgb(20,15,11) with same alpha */
+  --card-bg: rgba(20, 15, 11, 0.92);
+}
+
+html.minimal body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.35;
+}
+
+html.minimal .container { border-radius: 14px; box-shadow: var(--main-shadow); }
+html.minimal .stats-card { border-radius: 12px; box-shadow: 0 2px 10px rgba(25, 30, 48, 0.18); }
+html.minimal .mini-table th, html.minimal .mini-table td { padding: 6px 8px; }
+html.minimal .mini-table tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02); }

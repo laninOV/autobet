@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ru" class="minimal">
+<head>
+  <meta charset="UTF-8" />
+  <title>Анализ теннисных матчей</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="styles/theme.css" />
+  <link rel="stylesheet" href="styles/theme.minimal.css" />
+  <style>
+    html, body, .container { overflow-x: hidden; }
+    /* Hide vertical scrollbar per request (content is sized to fit) */
+    html, body { overflow-y: hidden !important; }
+    /* Improve legend readability */
+    #formLegend { font-size: 12px; color: #cbd5e1; }
+    #formLegend span.label { font-weight: 600; margin-right: 10px; }
+    /* Strength chart tweaks */
+    #formChart { display: block; max-width: 100%; }
+    table { width: 100%; table-layout: fixed; }
+    .mini-table th, .mini-table td { word-break: break-word; }
+    .dots-viz { overflow-x: hidden !important; }
+    /* Global summary header */
+    #globalSummary .summary-line1 { font-size:16px; font-weight:700; color:#e2e8f0; margin-bottom:4px; }
+    #globalSummary .summary-line2 { font-size:14px; font-weight:600; color:#cbd5e1; display:flex; flex-direction:column; gap:6px; }
+    #globalSummary .score-badge { display:inline-block; padding:6px 10px; border-radius:8px; border:1px solid #334155; background:#0b1220; }
+    #globalSummary .badge-green { background:#163321; color:#d8f5e6; border-color:#3cb371; }
+    #globalSummary .badge-yellow { background:#2e2413; color:#ffe4b3; border-color:#ffb347; }
+    #globalSummary .badge-red { background:#2b1513; color:#ffd6d2; border-color:#e74c3c; }
+    #globalSummary .score-bar { position:relative; height:6px; background:#0f172a; border-radius:4px; overflow:hidden; }
+    #globalSummary .score-fill { position:absolute; top:0; left:0; height:100%; width:0%; background:linear-gradient(90deg, #e74c3c 0%, #ffb347 50%, #3cb371 100%); transition:width 200ms ease; }
+    #globalSummary .legend { color:#94a3b8; font-size:12px; }
+  /* TB3.5 block styles */
+    #tb35Block .tb-title { font-weight:600; color:#e2e8f0; }
+    #tb35Block .tb-sub { color:#94a3b8; font-size:12px; }
+    #tb35Block .tb-badge { display:inline-block; padding:6px 10px; border-radius:8px; border:1px solid #334155; background:#0b1220; font-weight:600; }
+    #tb35Block .badge-green { background:#163321; color:#d8f5e6; border-color:#3cb371; }
+    #tb35Block .badge-yellow { background:#2e2413; color:#ffe4b3; border-color:#ffb347; }
+    #tb35Block .badge-red { background:#2b1513; color:#ffd6d2; border-color:#e74c3c; }
+  /* Fav rules visuals */
+    #favRulesBlock .rules-header { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    #favRulesBlock .rules-title { font-weight:600; color:#e2e8f0; }
+    #favRulesBlock .rules-sub { color:#94a3b8; font-size:12px; }
+    #favRulesBlock .score-card { border-radius:8px; padding:10px 12px; margin:6px 0 10px; font-weight:600; background:#0b1220; border:1px solid #1f2937; }
+    #favRulesBlock .card-green { background:#163321; color:#d8f5e6; border-color:#3cb371; }
+    #favRulesBlock .card-yellow { background:#2e2413; color:#ffe4b3; border-color:#ffb347; }
+    #favRulesBlock .card-red { background:#2b1513; color:#ffd6d2; border-color:#e74c3c; }
+    #favRulesBlock .score-bar { position:relative; height:6px; background:#0f172a; border-radius:4px; overflow:hidden; margin-top:6px; }
+    #favRulesBlock .score-fill { position:absolute; top:0; left:0; height:100%; width:0%; background:linear-gradient(90deg, #e74c3c 0%, #ffb347 50%, #3cb371 100%); transition:width 200ms ease; }
+    #favRulesBlock .badge { display:inline-block; min-width:52px; text-align:center; border-radius:999px; padding:2px 8px; font-weight:600; font-size:12px; }
+    #favRulesBlock .badge-pos { background:#064e3b; color:#34d399; border:1px solid #065f46; }
+    #favRulesBlock .badge-neg { background:#7f1d1d; color:#fca5a5; border:1px solid #991b1b; }
+    #favRulesBlock .badge-zero { background:#0f172a; color:#94a3b8; border:1px solid #1f2937; }
+    #favRulesBlock .muted { color:#94a3b8; font-size:12px; padding:4px 0; }
+    #favRulesBlock .toggle-btn { background:#1f2937; color:#cbd5e1; border:1px solid #334155; border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
+    #favRulesBlock.hide-zeros tr.row-zero { display:none; }
+    #favRulesBlock.hide-details table.mini-table { display:none; }
+    @media (max-width: 520px) {
+      #favRulesBlock table.mini-table thead { display:none; }
+      #favRulesBlock table.mini-table tbody tr { display:grid; grid-template-columns: 1fr; padding:6px 0; border-bottom:1px solid #1f2937; }
+      #favRulesBlock table.mini-table tbody tr td { padding:3px 0; }
+    }
+    #favRulesBlock table.mini-table td { vertical-align:middle; }
+    #favRulesBlock .crit-name { display:flex; align-items:center; gap:8px; }
+    #favRulesBlock .crit-icon { width:18px; text-align:center; }
+    /* Clutch Index badge */
+    .ci-badge { display:inline-block; padding:4px 10px; border-radius:6px; font-weight:600; cursor:pointer; border:1px solid #334155; }
+    .ci-better { background:#064e3b; color:#d1fae5; border-color:#065f46; }
+    .ci-worse  { background:#7f1d1d; color:#fecaca; border-color:#991b1b; }
+    .ci-equal  { background:#0f172a; color:#cbd5e1; border-color:#1f2937; }
+    .ci-details { color:#94a3b8; font-size:12px; margin-top:6px; display:none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <div id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      Анализируем...
+    </div>
+
+    <div id="error" class="error hidden"><p></p></div>
+
+    <div id="results" class="hidden">
+
+      <!-- Decision Summary (мини-блок условий) -->
+      <section class="stats-card" id="decisionSummaryBlock" style="margin:12px;">
+        <div id="decisionSummaryContainer">—</div>
+      </section>
+
+      <!-- Минималистичный прогноз (Winner + хинты) -->
+      <section class="stats-card" id="minimalForecastBlock" style="margin:12px;">
+        <div id="mfTitle" style="font-weight:700;">Fav: —</div>
+        <div id="mfSub" class="legend" style="margin-top:4px;">основано на: Non-BT, S*, H2H_smooth</div>
+        <div id="mfTB" style="margin-top:6px;">TB3.5: —</div>
+        <div id="mfSIG" class="legend" style="margin-top:4px;">SIG: —</div>
+        <div id="mfWarn" class="legend" style="margin-top:4px; display:none;">⚠ High variance: избегай ML, смотри тоталы</div>
+        <pre id="favImproved" style="margin-top:6px; white-space:pre-wrap; font-family:inherit; font-size:13px;"></pre>
+      </section>
+
+      <!-- Глобальное резюме: фаворит и качество ставки -->
+      <section class="stats-card" id="globalSummary" style="margin:12px;">
+        <div id="summaryFav" class="summary-line1">Fav: — • Logit-шанс победы: —</div>
+        <div class="summary-line2">
+          <div><span id="summaryScoreBadge" class="score-badge">Качество ставки → Score — → — (—%)</span> <span id="summaryRiskBadge" class="rules-sub"></span></div>
+          <div class="score-bar"><div id="summaryScoreFill" class="score-fill" style="width:0%"></div></div>
+          <div id="summaryLegend" class="legend">Цвет = качество ставки, а не прогноз победителя. RED = не ставить даже если фаворит выиграет.</div>
+        </div>
+      </section>
+
+      <!-- Вероятность длинного матча (≥4 сетов) -->
+      <section class="stats-card hidden" id="tb35Block" style="margin:12px;">
+        <div class="tb-title" title="На основе разницы в показателях EXT и стабильности. Чем ближе игроки по концовкам и форме, тем выше вероятность затяжного матча.">🧩 Вероятность длинного матча (≥ 4 сетов)</div>
+        <div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
+          <div><span id="tb35Badge" class="tb-badge">—</span> <span id="tb35Note" class="tb-sub"></span></div>
+          <div id="tb35Explain" class="tb-sub"></div>
+        </div>
+      </section>
+
+      <!-- Ряд 1: Топ-3 и Статистика игроков -->
+      <div class="two-column">
+        <section class="stats-card" id="top3Block">
+          <h3>🏆 Топ 3 счета (10 игр)</h3>
+          <div class="two-column" style="margin-top:6px; gap: 12px;">
+            <section>
+              <h4 style="margin:6px 0 4px; font-size:12px; color:#94a3b8;">Как было (10 + H2H)</h4>
+              <table class="mini-table" aria-label="Топ 3 счета — смешанная модель (10 игр + H2H)">
+                <thead><tr><th>Счет</th><th>Вероятность</th></tr></thead>
+                <tbody id="topBTOldScoresBody"></tbody>
+              </table>
+            </section>
+            <section>
+              <h4 style="margin:6px 0 4px; font-size:12px; color:#94a3b8;">10 игр (без H2H)</h4>
+              <table class="mini-table" aria-label="Топ 3 счета — без учёта H2H (последние 10 игр)">
+                <thead><tr><th>Счет</th><th>Вероятность</th></tr></thead>
+                <tbody id="topBT10Body"></tbody>
+              </table>
+            </section>
+          </div>
+          <div class="two-column" style="margin-top:6px; gap: 12px;">
+            <section style="grid-column: 1 / span 2;">
+              <h4 style="margin:6px 0 4px; font-size:12px; color:#94a3b8;">5 игр (5 игр + 5 H2H)</h4>
+              <table class="mini-table" aria-label="Топ 3 счета — последние 5 игр и 5 H2H">
+                <thead><tr><th>Счет</th><th>Вероятность</th></tr></thead>
+                <tbody id="topBT5MixBody"></tbody>
+              </table>
+            </section>
+          </div>
+
+          <h3>Вероятность (без BT)</h3>
+          <table class="mini-table nb-vert" aria-label="Комплексная вероятность без Брэдли–Терри">
+            <thead>
+              <tr>
+                <th>Игрок</th>
+                <th>Вероятность</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td id="probNoBtNameA">Игрок 1</td><td id="probNoBtA">-</td></tr>
+              <tr><td id="probNoBtNameB">Игрок 2</td><td id="probNoBtB">-</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Визуализация результатов</h3>
+          <div class="match-visualization" aria-label="Визуализация последних результатов игроков">
+            <div class="match-viz-row">
+              <span id="vizNameFav" class="player-name-viz"></span>
+              <span id="matchVizFav" class="dots-viz" aria-hidden="true"></span>
+            </div>
+            <div class="match-viz-row">
+              <span id="vizNameUnd" class="player-name-viz"></span>
+              <span id="matchVizUnd" class="dots-viz" aria-hidden="true"></span>
+            </div>
+            <div class="match-viz-row" id="h2hVizRow" style="display:none;">
+              <span class="player-name-viz" id="h2hVizLabel">H2H:</span>
+              <span id="h2hVizInline" class="dots-viz"></span>
+            </div>
+            <div class="legend" id="h2hLegend" style="display:none;"></div>
+          </div>
+        </section>
+        <section class="stats-card">
+          <h3>Статистика игроков</h3>
+          <table class="mini-table" aria-describedby="statsDesc">
+            <thead>
+              <tr>
+                <th>Показатель</th>
+                <th id="statName1">Игрок 1</th>
+                <th id="statName2">Игрок 2</th>
+              </tr>
+            </thead>
+          <tbody>
+            <tr><td>S₂</td><td id="s2Player1">-</td><td id="s2Player2">-</td></tr>
+            <tr><td>S₅</td><td id="s5Player1">-</td><td id="s5Player2">-</td></tr>
+            <tr><td>Матчей сегодня</td><td id="matchesToday1">-</td><td id="matchesToday2">-</td></tr>
+            <tr><td>Последняя игра</td><td id="lastGame1">-</td><td id="lastGame2">-</td></tr>
+            <tr><td>Очки (5 матчей)</td><td id="scorePoints1">-</td><td id="scorePoints2">-</td></tr>
+            <tr><td>Разница очков (5 матчей)</td><td id="avgPtsDiffStat1">-</td><td id="avgPtsDiffStat2">-</td></tr>
+            <tr><td>Разница очков (10 матчей)</td><td id="avgPtsDiff10Stat1">-</td><td id="avgPtsDiff10Stat2">-</td></tr>
+            <tr>
+              <td>Clutch Index</td>
+              <td id="ciCell1"><span id="ciBadge1" class="ci-badge">—</span><div id="ciDetails1" class="ci-details"></div></td>
+              <td id="ciCell2"><span id="ciBadge2" class="ci-badge">—</span><div id="ciDetails2" class="ci-details"></div></td>
+            </tr>
+          </tbody>
+        </table>
+          
+          <h3>Победы в сетах (общая статистика)</h3>
+          <table class="mini-table" id="setsTable">
+            <thead>
+              <tr><th>Сет</th><th id="p1Sets">Игрок 1</th><th id="p2Sets">Игрок 2</th></tr>
+            </thead>
+            <tbody id="setsTableBody"></tbody>
+          </table>
+      </section>
+      </div>
+
+      <!-- Ряд 2: Основные показатели и Победы в сетах -->
+      <div class="two-column">
+        <section class="stats-card">
+          <h3>Основные показатели</h3>
+          <table class="mini-table" aria-label="Основные показатели игроков">
+            <thead>
+              <tr>
+                <th>Показатель</th>
+                <th id="mainPlayerA">Игрок 1</th>
+                <th id="mainPlayerB">Игрок 2</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Сила</td><td id="mainStrengthA">-</td><td id="mainStrengthB">-</td></tr>
+              <tr><td>Эффективная сила</td><td id="effStrengthA">-</td><td id="effStrengthB">-</td></tr>
+              <tr><td>H2H</td><td id="mainH2HA">-</td><td id="mainH2HB">-</td></tr>
+              <tr><td>Стабильность</td><td id="mainStabilityA">-</td><td id="mainStabilityB">-</td></tr>
+            </tbody>
+          </table>
+
+
+          <!-- Паттерны (последние 5 матчей) в том же блоке -->
+          <h3>Паттерны (последние 5 матчей)</h3>
+          <table class="mini-table" aria-label="Паттерны по последним 5 матчам">
+            <thead>
+              <tr>
+                <th>Паттерн</th>
+                <th id="patName1">Игрок 1</th>
+                <th id="patName2">Игрок 2</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Победы после выигрыша первого сета</td>
+                <td id="pAfter10_1">-</td>
+                <td id="pAfter10_2">-</td>
+              </tr>
+              <tr>
+                <td>Победы после проигрыша первого сета</td>
+                <td id="pAfter01_1">-</td>
+                <td id="pAfter01_2">-</td>
+              </tr>
+              <tr>
+                <td>Поражения после лидерства 2:1</td>
+                <td id="pLoss21_1">-</td>
+                <td id="pLoss21_2">-</td>
+              </tr>
+              <tr>
+                <td>Победы после проигрыша при счёте 1:2</td>
+                <td id="pAfter12_1">-</td>
+                <td id="pAfter12_2">-</td>
+              </tr>
+              <tr>
+                <td>Победы при серии из двух выигранных сетов</td>
+                <td id="pTwoRun_1">-</td>
+                <td id="pTwoRun_2">-</td>
+              </tr>
+              <tr>
+                <td>Поражения при серии из двух выигранных сетов</td>
+                <td id="pTwoRunLoss_1">—</td>
+                <td id="pTwoRunLoss_2">—</td>
+              </tr>
+              <tr>
+                <td>Победы при счёте 2:2 (решающий 5-й сет)</td>
+                <td id="pAt22_1">-</td>
+                <td id="pAt22_2">-</td>
+              </tr>
+              <tr>
+                <td>Победы после двух проигранных сетов</td>
+                <td id="from02_1">—</td>
+                <td id="from02_2">—</td>
+              </tr>
+              <tr>
+                <td>Проигрыши тай-брейков</td>
+                <td id="pTiebreakLoss_1">-</td>
+                <td id="pTiebreakLoss_2">-</td>
+              </tr>
+              <!-- Итог по паттернам: два варианта -->
+              <tr>
+                <td>ext</td>
+                <td id="patExt1">—</td>
+                <td id="patExt2">—</td>
+              </tr>
+              <tr>
+                <td>pf</td>
+                <td id="patPF1">—</td>
+                <td id="patPF2">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        
+      </div>
+
+      
+
+      <!-- Индекс согласия (Consensus) -->
+      <section class="stats-card" id="consensusBlock">
+        <h3>Индекс согласия</h3>
+        <div class="cons-row">
+          <span id="consBadge" class="cons-badge">—</span>
+          <span id="consGradeDesc" class="cons-desc">—</span>
+          <span class="cons-prob">p = <span id="consProb">—</span></span>
+          <span id="consProbHint" class="cons-hint"></span>
+        </div>
+        
+        <ul id="consExplain" class="cons-explain"></ul>
+      </section>
+
+
+      <!-- Ряд 3: Общие соперники (перенесено вниз) -->
+      <section class="stats-card">
+        <h3>Общие соперники</h3>
+        <div id="commonOppBlock">
+          <table class="mini-table" aria-label="Сравнение по общим соперникам">
+            <thead>
+              <tr>
+                <th>Соперник</th>
+                <th id="commonOppNameA">Игрок 1</th>
+                <th id="commonOppNameB">Игрок 2</th>
+                <th>Преимущество</th>
+              </tr>
+            </thead>
+            <tbody id="commonOppTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      
+
+    </div>
+
+  </div>
+
+  <!-- Итоговый прогноз -->
+  <section class="stats-card" id="finalBlock" style="margin:12px;">
+    <h3>Итоговый прогноз</h3>
+    <table class="mini-table" aria-label="Итоговый агрегированный прогноз">
+      <tbody>
+        <tr><td>Фаворит</td><td id="finalFav">—</td></tr>
+        <tr><td>Вероятность</td><td id="finalProb">—</td></tr>
+        <tr><td>Уверенность</td><td id="finalConf">—</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Логистическая модель на признаках (последние 10 + H2H) -->
+  <section class="stats-card" id="modelBlock" style="margin:12px;">
+    <h3>Прогноз (логистическая модель)</h3>
+    <table class="mini-table" aria-label="Прогноз по логистической модели">
+      <thead>
+        <tr>
+          <th>Показатель</th>
+          <th id="modelNameA">Игрок 1</th>
+          <th id="modelNameB">Игрок 2</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Вероятность (10)</td><td id="modelProb10A">—</td><td id="modelProb10B">—</td></tr>
+        <tr><td>Вероятность (5)</td><td id="modelProb5A">—</td><td id="modelProb5B">—</td></tr>
+        <tr><td>Вероятность (3)</td><td id="modelProb3A">—</td><td id="modelProb3B">—</td></tr>
+        <tr><td>ΔF / ΔS / ΔD / ΔT (10; отн. фаворита)</td><td colspan="2" id="modelDeltas10">—</td></tr>
+        <tr><td>ΔF / ΔS / ΔD / ΔT (5; отн. фаворита)</td><td colspan="2" id="modelDeltas5">—</td></tr>
+        <tr><td>ΔF / ΔS / ΔD / ΔT (3; отн. фаворита)</td><td colspan="2" id="modelDeltas3">—</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Правила победы фаворита -->
+  <section class="stats-card hidden" id="favRulesBlock" style="margin:12px;">
+    <h3>Правила победы фаворита</h3>
+    <div class="rules-header">
+      <div>
+        <div class="rules-title" id="favRulesHeader"></div>
+        <div class="rules-sub" id="favRulesSub"></div>
+      </div>
+      <button class="toggle-btn" id="favRulesToggle" type="button">Показать разбор</button>
+    </div>
+    <div class="score-card" id="favRulesCard">—
+      <div class="score-bar"><div class="score-fill" id="favScoreFill" style="width:0%"></div></div>
+    </div>
+    <table class="mini-table" aria-label="Проверка правил для победы фаворита">
+      <thead>
+        <tr>
+          <th>Критерий</th>
+          <th>Статус</th>
+        </tr>
+      </thead>
+      <tbody id="favRulesBody">
+        <tr><td>ext у фаворита > 50%</td><td id="favRuleExt">—</td></tr>
+        <tr><td>Общие соперники: преимущество у фаворита</td><td id="favRuleCommon">—</td></tr>
+        <tr><td>BT: на стороне фаворита</td><td id="favRuleBT">—</td></tr>
+        <tr><td>Без BT: ≥ 60% и совпадает с BT</td><td id="favRuleNoBT">—</td></tr>
+        <tr><td>Логистическая модель: Вероятность (3) > 55% на фаворита</td><td id="favRuleLogit">—</td></tr>
+        <tr><td>Индекс силы/форма (10 игр): ≥ 65%</td><td id="favRuleStrengthIdx">—</td></tr>
+      </tbody>
+    </table>
+    <div id="favRulesSummary" class="muted"></div>
+  </section>
+
+  <!-- Индекс силы матча и форма (новый блок) -->
+  <section class="stats-card" id="strengthIndexBlock" style="margin:12px;">
+    <h3>Индекс силы и форма (10 игр)</h3>
+    <table class="mini-table" aria-label="Индекс силы и прогноз">
+      <thead>
+        <tr>
+          <th>Показатель</th>
+          <th id="siNameA">Игрок 1</th>
+          <th id="siNameB">Игрок 2</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Вероятность (10)</td><td id="siProb10A">—</td><td id="siProb10B">—</td></tr>
+        <tr><td>Вероятность (5)</td><td id="siProb5A">—</td><td id="siProb5B">—</td></tr>
+        <tr><td>Вероятность (3)</td><td id="siProb3A">—</td><td id="siProb3B">—</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  
+
+  
+
+  <script src="../lib/bt-mm.js"></script>
+  <script src="../lib/consensus.js"></script>
+  <script src="../lib/committee.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

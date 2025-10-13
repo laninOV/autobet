@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "Tennis Score Extractor",
+  "description": "Extract player names and match/set scores on score-tennis.com and tennis-score.pro stats/match pages.",
+  "version": "0.2.1",
+  "action": {
+    "default_title": "Tennis Score Extractor",
+    "default_popup": "popup/index.html"
+  },
+  "background": {
+    "service_worker": "background/index.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://score-tennis.com/stats*",
+        "https://www.score-tennis.com/stats*",
+        "https://score-tennis.com/mstat/*",
+        "https://www.score-tennis.com/mstat/*",
+        "https://score-tennis.com/players/*",
+        "https://www.score-tennis.com/players/*",
+        "https://tennis-score.pro/stats*",
+        "https://www.tennis-score.pro/stats*",
+        "https://tennis-score.pro/mstat/*",
+        "https://www.tennis-score.pro/mstat/*",
+        "https://tennis-score.pro/players/*",
+        "https://www.tennis-score.pro/players/*",
+        "http://score-tennis.com/stats*",
+        "http://www.score-tennis.com/stats*",
+        "http://score-tennis.com/mstat/*",
+        "http://www.score-tennis.com/mstat/*",
+        "http://score-tennis.com/players/*",
+        "http://www.score-tennis.com/players/*",
+        "http://tennis-score.pro/stats*",
+        "http://www.tennis-score.pro/stats*",
+        "http://tennis-score.pro/mstat/*",
+        "http://www.tennis-score.pro/mstat/*",
+        "http://tennis-score.pro/players/*",
+        "http://www.tennis-score.pro/players/*"
+      ],
+      "js": [
+        "lib/meta-calibration.js",
+        "lib/bt-mm.js",
+        "lib/bradley-terry.js",
+        "content/index.js"
+      ],
+      "css": [
+        "content/styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "https://score-tennis.com/*",
+    "https://www.score-tennis.com/*",
+    "https://tennis-score.pro/*",
+    "https://www.tennis-score.pro/*",
+    "http://score-tennis.com/*",
+    "http://www.score-tennis.com/*",
+    "http://tennis-score.pro/*",
+    "http://www.tennis-score.pro/*"
+  ],
+  "permissions": [
+    "activeTab",
+    "tabs"
+  ]
+}
