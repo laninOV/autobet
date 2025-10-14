@@ -16,10 +16,14 @@ Notes:
 """
 
 import os
+import json
 import csv
 from datetime import datetime
 import argparse
 from typing import List
+import sys
+import threading
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -127,19 +131,32 @@ def init_outputs():
     try:
         if os.path.exists(OUTPUT_PREMA_CSV):
             os.remove(OUTPUT_PREMA_CSV)
-            print(f"[init] removed prema csv: {OUTPUT_PREMA_CSV}")
+            print(f"[init] removed prema csv: {os.path.abspath(OUTPUT_PREMA_CSV)}")
     except Exception as e:
         print(f"[init] warn: cannot remove prema csv: {e}")
     try:
         if os.path.exists(PROCESSED_PREMA_JSON):
             os.remove(PROCESSED_PREMA_JSON)
-            print(f"[init] removed processed prema: {PROCESSED_PREMA_JSON}")
+            print(f"[init] removed processed prema: {os.path.abspath(PROCESSED_PREMA_JSON)}")
     except Exception as e:
         print(f"[init] warn: cannot remove processed prema: {e}")
     try:
         with open(OUTPUT_PREMA_CSV, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["timestamp", "favorite", "opponent", "reason", "url"])
-        print(f"[init] created header at {OUTPUT_PREMA_CSV}")
+            w = csv.writer(f)
+            w.writerow(["timestamp", "favorite", "opponent", "reason", "url"])
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
+        print(f"[init] created header at {os.path.abspath(OUTPUT_PREMA_CSV)}")
+        # Быстрая проверка: файл действительно перезаписан и начинается с заголовка
+        try:
+            with open(OUTPUT_PREMA_CSV, "r", encoding="utf-8") as fr:
+                first_line = fr.readline().strip()
+            if first_line != "timestamp,favorite,opponent,reason,url":
+                print("[init] warn: header mismatch — файл мог не перезаписаться корректно")
+        except Exception:
+            pass
     except Exception as e:
         print(f"[init] error: cannot create header: {e}")
 
@@ -154,18 +171,53 @@ def run(filters: List[str]) -> int:
     with sync_playwright() as p:
         ext_path = os.path.expanduser(args.extension_path) if args.extension_path else None
 
-        # Persistent profile with extension
+        # Persistent profile with extension (с защитой от зависшего SingletonLock)
         user_data_dir = os.path.join(HERE, ".chromium-profile")
         os.makedirs(user_data_dir, exist_ok=True)
-        context = p.chromium.launch_persistent_context(
-            user_data_dir,
-            headless=False,
-            args=[
-                f"--disable-extensions-except={ext_path}",
-                f"--load-extension={ext_path}",
-            ] if (ext_path and os.path.isdir(ext_path)) else None,
-        )
+        if ext_path and os.path.isdir(ext_path):
+            print(f"[ext] loading extension from: {ext_path}")
+        else:
+            print(f"[ext] extension path not found or not a dir: {ext_path}")
+
+        def _cleanup_profile_locks(path: str):
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    pth = os.path.join(path, name)
+                    if os.path.exists(pth):
+                        os.remove(pth)
+                except Exception:
+                    pass
+
+        _cleanup_profile_locks(user_data_dir)
+
+        context = None
+        try:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir,
+                headless=False,
+                args=[
+                    f"--disable-extensions-except={ext_path}",
+                    f"--load-extension={ext_path}",
+                ] if (ext_path and os.path.isdir(ext_path)) else None,
+            )
+        except Exception as e:
+            # Фолбэк: создаём уникальный профиль для этого запуска
+            alt_dir = os.path.join(HERE, f".chromium-profile-{int(time.time())}")
+            try:
+                os.makedirs(alt_dir, exist_ok=True)
+            except Exception:
+                pass
+            print(f"[ext] warn: persistent profile in use, retry with {alt_dir}")
+            context = p.chromium.launch_persistent_context(
+                alt_dir,
+                headless=False,
+                args=[
+                    f"--disable-extensions-except={ext_path}",
+                    f"--load-extension={ext_path}",
+                ] if (ext_path and os.path.isdir(ext_path)) else None,
+            )
         page = context.new_page() if len(context.pages) == 0 else context.pages[0]
+        root_page = page  # запомним базовую вкладку up-games
 
         email = args.email or os.getenv("TENNIS_EMAIL") or "barbosa197223@gmail.com"
         password = args.password or os.getenv("TENNIS_PASSWORD") or "FiksA732528"
@@ -180,19 +232,45 @@ def run(filters: List[str]) -> int:
             page.goto(URL_UPCOMING, wait_until="domcontentloaded")
         except Exception:
             pass
-        # Явно дождаться появления хотя бы одной stat-ссылки в DOM
+
+        # Если включён фильтр лиг — применим его через уже готовый FILTER_JS
         try:
-            page.wait_for_selector("a.stat-page[href*='/stats/?']", timeout=7000)
+            if filters:
+                allowed_js = json.dumps(filters, ensure_ascii=False)
+                page.evaluate(FILTER_JS % {"allowed": allowed_js})
         except Exception:
             pass
-        try:
-            vis_count = page.locator("a.stat-page[href*='/stats/?']").count()
-            print(f"[debug] visible stat anchors: {vis_count}")
-        except Exception:
-            print("[debug] visible stat anchors: n/a")
 
-        # Ничего не прокручиваем: работаем только с тем, что уже загружено в DOM.
+        # Быстро подтвердим cookies, если всплывёт попап
+        for text in ("Принять", "Согласен", "Accept", "I Agree", "Я согласен"):
+            try:
+                page.locator(f"button:has-text(\"{text}\")").first.click(timeout=800)
+            except Exception:
+                pass
+
+        # Дождаться появления блоков матчей или хотя бы стат-ссылок
+        try:
+            page.wait_for_selector("div.mb-4.simple-block.main-block.bg-white", timeout=6000)
+        except Exception:
+            try:
+                page.wait_for_selector("a.stat-page[href*='/stats/?']", timeout=4000)
+            except Exception:
+                pass
+
+        # Прокрутим, чтобы подгрузить больше блоков (как в live)
+        try:
+            expand_live_list(page)
+        except Exception:
+            pass
         page.wait_for_timeout(300)
+
+        # Диагностика наличия блоков и ссылок
+        try:
+            nb = page.locator("div.mb-4.simple-block.main-block.bg-white").count()
+            na = page.locator("a.stat-page[href*='/stats/?']").count()
+            print(f"[debug] blocks={nb}, stat-anchors={na}")
+        except Exception:
+            pass
 
         # Collect links
         links: List[str] = []
@@ -229,13 +307,31 @@ def run(filters: List[str]) -> int:
                 print(f"[UPCOMING] Ошибка сбора матчей: {e}")
                 links = []
 
+        # Позволяем пользователю в любой момент завершить работу по Enter
+        stop_event = threading.Event()
+        def _wait_for_enter():
+            try:
+                input()
+            except Exception:
+                pass
+            stop_event.set()
+        try:
+            t = threading.Thread(target=_wait_for_enter, daemon=True)
+            t.start()
+            print("Нажмите Enter в консоли для немедленного завершения...")
+        except Exception:
+            pass
+
         processed = load_processed_urls(PROCESSED_PREMA_JSON)
         saved = 0
         visited = 0
         skipped_processed = 0
-        # Открываем КАЖДУЮ страницу статистики в НОВОЙ вкладке и не закрываем её
-        stats_tab = None  # не используется в этом режиме, оставлено на случай возврата к reuse
+        # Открываем КАЖДУЮ страницу статистики в НОВОЙ вкладке, анализируем и СРАЗУ закрываем
+        stats_tab = None  # не используется
         for url in links:
+            if stop_event.is_set():
+                print("[stop] Остановлено пользователем (Enter)")
+                break
             print(f"[open] → {url}")
             if url in processed:
                 skipped_processed += 1
@@ -243,101 +339,258 @@ def run(filters: List[str]) -> int:
             try:
                 # Создаём новую вкладку и переходим по прямому URL
                 active = context.new_page()
-                active.goto(url, wait_until="domcontentloaded", timeout=25000)
+                active.goto(url, wait_until="domcontentloaded", timeout=15000)
                 try:
                     active.bring_to_front()
                 except Exception:
                     pass
+                # Короткое ожидание сети, не задерживаем вкладку надолго
                 try:
-                    active.wait_for_load_state('networkidle', timeout=15000)
+                    active.wait_for_load_state('networkidle', timeout=3000)
                 except Exception:
                     pass
                 try:
                     print(f"[open] at {active.url}")
                 except Exception:
                     pass
-                # Дождаться появления блока расширения с прогнозом
-                wait_for_decision_block(active, timeout_ms=6000)
+                # Дождаться появления блока расширения с прогнозом (до 10 секунд)
+                wait_for_decision_block(active, timeout_ms=10000)
                 lp, rp = parse_players_from_stats_url(url)
                 fav, opp, _, reason = extract_favorite_and_opponents(active, lp=lp, rp=rp)
-                if fav and opp and reason:
+                # Если не нашли условия с первого прохода — дадим ещё короткую паузу и попробуем снова
+                if not reason:
+                    try:
+                        active.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+                    _, _, _, reason2 = extract_favorite_and_opponents(active, lp=lp, rp=rp)
+                    if reason2:
+                        reason = reason2
+
+                # Жёсткий фолбэк: распарсим блок расширения напрямую из DOM
+                if not reason:
+                    try:
+                        dec_text = active.evaluate(
+                            """
+                            () => {
+                              const el = document.querySelector('.take-two-sets');
+                              return el ? (el.innerText || '') : '';
+                            }
+                            """
+                        ) or ""
+                    except Exception:
+                        dec_text = ""
+                    if dec_text:
+                        import re as _re
+                        t = dec_text
+                        # Извлекаем вердикт и совпадения
+                        m_ver = _re.search(r"Решение\s*:\s*([^|\n\r]+)", t, _re.IGNORECASE)
+                        verdict_raw = (m_ver.group(1).strip() if m_ver else '').upper()
+                        is_go = 'GO' in verdict_raw
+                        m_match = _re.search(r"Совпадений\s*:\s*(\d)\s*/\s*3\b", t, _re.IGNORECASE)
+                        match_str = None
+                        if m_match:
+                            d = m_match.group(1)
+                            if d in ('0','1','2','3'):
+                                match_str = f"{d}/3"
+                        # Всегда ставим PASS или GO
+                        label = 'GO' if is_go else 'PASS'
+                        reason = label if not match_str else f"{label} {match_str}"
+                        # Попробуем вытащить фаворита
+                        if not fav:
+                            m_f = _re.search(r"Фаворит\s*:\s*([^\n\r]+)", t, _re.IGNORECASE)
+                            if m_f:
+                                fav = (m_f.group(1) or '').strip()
+                # Если нашли решение, но не распознали игроков — попробуем простые фолбэки
+                if reason and (not fav or not opp):
+                    try:
+                        names = active.evaluate(
+                            """
+                            () => {
+                              const set = new Set();
+                              const add = (s) => { if (s) { s = String(s).trim(); if (s && s.length >= 2 && s.length <= 40) set.add(s); } };
+                              // Ссылки на игроков
+                              document.querySelectorAll("a[href*='/players/']").forEach(a => add(a.textContent));
+                              // Явные элементы имён
+                              document.querySelectorAll(".player-name, .competitor .name, .competitor-name, .team .name, h1, h2").forEach(el => add(el.textContent));
+                              const arr = Array.from(set).filter(Boolean);
+                              // Возвращаем первые две строки
+                              return arr.slice(0,2);
+                            }
+                            """
+                        ) or []
+                        if isinstance(names, list):
+                            if not fav and len(names) >= 1:
+                                fav = names[0]
+                            if not opp and len(names) >= 2:
+                                opp = names[1]
+                    except Exception:
+                        pass
+                if reason and not fav:
+                    fav = ""
+                if reason and not opp:
+                    opp = ""
+                if fav is not None and opp is not None and reason:
                     hhmm = datetime.now().strftime("%H:%M")
                     save_match_row(url, fav, opp, f"{reason}, {hhmm}", OUTPUT_PREMA_CSV)
                     processed.add(url)
                     saved += 1
                     print(f"[saved:{reason}] {fav} vs {opp}")
-                # Небольшая пауза между переходами
-                try:
-                    active.wait_for_timeout(300)
-                except Exception:
-                    pass
+                else:
+                    # Отладка: выведем фрагмент блока/страницы, чтобы понять, что увидели
+                    if os.getenv("AUTOBET_DEBUG"):
+                        try:
+                            blk = active.locator('.take-two-sets').first
+                            txt = blk.inner_text(timeout=500) if blk.count() > 0 and blk.is_visible(timeout=200) else active.locator('body').inner_text(timeout=800)
+                            import re as _re
+                            snippet = _re.sub(r"\s+", " ", txt)[:220]
+                            print(f"[debug] no-save snippet: {snippet}")
+                        except Exception:
+                            pass
             except Exception as e:
                 print(f"[error] {url}: {e}")
+            finally:
+                # Закрываем активную вкладку и любые случайно оставшиеся вкладки кроме корневой (без задержки)
+                try:
+                    if 'active' in locals() and active:
+                        try:
+                            if hasattr(active, 'is_closed'):
+                                if not active.is_closed():
+                                    active.close()
+                            else:
+                                active.close()
+                            print("[close] stats tab closed")
+                        except Exception:
+                            pass
+                    # Перестраховка: закрыть все дополнительные вкладки, кроме root_page
+                    try:
+                        for p2 in list(context.pages):
+                            if p2 is root_page:
+                                continue
+                            try:
+                                if hasattr(p2, 'is_closed') and p2.is_closed():
+                                    continue
+                                p2.close()
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             visited += 1
 
         save_processed_urls(processed, PROCESSED_PREMA_JSON)
         print(f"Итог: собрано ссылок={len(links)}, открыто={visited}, сохранено={saved}, пропущено как processed={skipped_processed}")
 
-        # Оставляем страницы открытыми для ручного просмотра
-        try:
-            print("Просмотр окон открыт. Нажмите Enter для завершения...")
-            input()
-        except KeyboardInterrupt:
-            pass
         return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(run([]))
 
 
 # ----------------------- helpers (upcoming) -----------------------
 
 def collect_filtered_stats_links_upcoming(page, allowed_filters: List[str]) -> List[str]:
-    """Collect stats links from up-games page that belong to allowed tournaments.
-    Uses DOM text around the link to ensure it matches one of allowed_filters.
+    """Идём по каждому блоку up-games и берём ссылку на статистику.
+
+    Сначала пробуем собрать всё в один проход через evaluate (быстрее и надёжнее),
+    затем резервный вариант — через Locator-итерацию. Порядок сохранён как в DOM.
     """
     base = "https://tennis-score.pro"
-    # Normalize allowed filters
     allowed = [s for s in (allowed_filters or []) if isinstance(s, str) and s.strip()]
     allowed_low = [s.lower() for s in allowed]
 
-    hrefs = []
+    hrefs: List[str] = []
     seen = set()
-    # На up-games целевая ссылка имеет класс .stat-page (класс .tag может отсутствовать)
-    anchors = page.locator("a.stat-page[href*='/stats/?']")
-    count = anchors.count()
-    for i in range(count):
-        a = anchors.nth(i)
-        try:
-            # skip filtered-out rows (league filter only). Do NOT skip limit-hidden: we scan all matches.
-            hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
-            if hidden:
+
+    # Попытка 1: собрать в JS все пары (href, text) по блокам
+    try:
+        items = page.evaluate(
+            """
+            () => {
+              const base = location.origin;
+              const out = [];
+              const blocks = Array.from(document.querySelectorAll('div.mb-4.simple-block.main-block.bg-white'));
+              for (const blk of blocks) {
+                if (!blk || blk.classList.contains('__auto-filter-hidden__') || blk.closest('.__auto-filter-hidden__')) continue;
+                const a = blk.querySelector("a.stat-page[href*='/stats/?']");
+                if (!a) continue;
+                const href = a.getAttribute('href') || '';
+                if (!href || href.startsWith('#')) continue;
+                const abs = new URL(href, base).href;
+                const txt = (blk.innerText || blk.textContent || '').toLowerCase();
+                out.push([abs, txt]);
+              }
+              return out;
+            }
+            """
+        ) or []
+        for abs_url, txt in items:
+            if allowed_low and not any(s in txt for s in allowed_low):
                 continue
-            href = a.get_attribute("href") or ""
-            if not href or href.startswith("#"):
-                continue
-            # Extract surrounding row text to match tournament name
-            txt = a.evaluate(
-                "el => {\n"
-                "  function textOf(node){ return (node && (node.innerText||node.textContent)||'').replace(/\\s+/g,' ').trim(); }\n"
-                "  const isRow = n => {\n"
-                "    if (!n || n.nodeType !== 1) return false;\n"
-                "    const c = n.className ? String(n.className) : '';\n"
-                "    return n.getAttribute('role')==='row' || /\\b(row|match|event|list|table|card)\\b/i.test(c);\n"
-                "  };\n"
-                "  let p = el; let hops = 0;\n"
-                "  while (p && hops < 8) { p = p.parentElement; if (!p) break; if (isRow(p)) return textOf(p); hops++; }\n"
-                "  return textOf(el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('tr') || el.closest('li') || el.closest('.match') || el.closest('.event') || el);\n"
-                "}"
-            ) or ""
-            m = txt.lower()
-            if allowed_low and not any(s in m for s in allowed_low):
-                continue
-            abs_url = __import__('urllib.parse').urljoin(base, href)
             if abs_url not in seen:
                 hrefs.append(abs_url)
                 seen.add(abs_url)
+    except Exception:
+        pass
+
+    # Попытка 2: через Locator (если JS не дал результата)
+    if not hrefs:
+        blocks = page.locator("div.mb-4.simple-block.main-block.bg-white")
+        total_blocks = 0
+        try:
+            total_blocks = blocks.count()
         except Exception:
-            continue
+            total_blocks = 0
+        for i in range(total_blocks):
+            blk = blocks.nth(i)
+            try:
+                hidden = blk.evaluate("el => !!el.closest('.__auto-filter-hidden__') || el.classList.contains('__auto-filter-hidden__')")
+                if hidden:
+                    continue
+                # Фильтрация по лигам, если включена
+                if allowed_low:
+                    txt = blk.evaluate("el => (el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim().toLowerCase()") or ""
+                    if not any(s in txt for s in allowed_low):
+                        continue
+                a = blk.locator("a.stat-page.tag[href*='/stats/?'], a.stat-page[href*='/stats/?']").first
+                if a.count() == 0:
+                    continue
+                href = a.get_attribute("href") or ""
+                if not href or href.startswith('#'):
+                    continue
+                abs_url = __import__('urllib.parse').urljoin(base, href)
+                if abs_url not in seen:
+                    hrefs.append(abs_url)
+                    seen.add(abs_url)
+            except Exception:
+                continue
+
+    # Фолбэк 3: общий поиск по якорям
+    if not hrefs:
+        try:
+            anchors = page.locator("a.stat-page[href*='/stats/?']")
+            count = anchors.count()
+            for j in range(count):
+                a = anchors.nth(j)
+                try:
+                    hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
+                    if hidden:
+                        continue
+                    href = a.get_attribute("href") or ""
+                    if not href or href.startswith('#'):
+                        continue
+                    txt = a.evaluate("el => (el.closest('.mb-4.simple-block.main-block.bg-white') || el.closest('[role=row]') || el.closest('.row') || el).innerText.toLowerCase()") or ""
+                    if allowed_low and not any(s in txt for s in allowed_low):
+                        continue
+                    abs_url = __import__('urllib.parse').urljoin(base, href)
+                    if abs_url not in seen:
+                        hrefs.append(abs_url)
+                        seen.add(abs_url)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     return hrefs
+
+
+if __name__ == "__main__":
+    raise SystemExit(run([]))
