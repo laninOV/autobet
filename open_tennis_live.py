@@ -26,6 +26,7 @@ from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs
 from typing import List, Optional, Tuple, Set
 import threading
+import time
 
 URL = "https://tennis-score.pro/live_v2/"
 URL_UPCOMING = "https://tennis-score.pro/up-games/"
@@ -320,11 +321,27 @@ def run(filters: List[str]) -> None:
             pass
 
         # Экспортируем функцию перезапуска в страницу и рендерим кнопку управления
+        # Также готовим мгновенное завершение по Enter
+        stop_event = threading.Event()
+
+        def _wait_for_enter():
+            try:
+                input()
+            except Exception:
+                pass
+            stop_event.set()
+
+        try:
+            t = threading.Thread(target=_wait_for_enter, daemon=True)
+            t.start()
+            print("Нажмите Enter для немедленного завершения (live-сбор)")
+        except Exception:
+            pass
         def _restart_from_ui():
             # ВАЖНО: Playwright sync API не потокобезопасен —
             # выполняем restart_scan в том же потоке, что и контекст/страница
             try:
-                restart_scan(context, page, filters)
+                restart_scan(context, page, filters, stop_event)
                 return True
             except Exception:
                 return False
@@ -342,14 +359,44 @@ def run(filters: List[str]) -> None:
 
         # Первый прогон
         try:
-            restart_scan(context, page, filters)
+            restart_scan(context, page, filters, stop_event)
         except Exception as e:
             print(f"[scan] Ошибка первого прогона: {e}")
 
-        # Переход на fon.bet временно отключён по запросу
+        # Фоновый режим: переcкан списка каждые interval_sec в течение bg_minutes
+        try:
+            bg_minutes = getattr(args, 'bg_minutes', None)
+            interval_sec = getattr(args, 'bg_interval', None)
+        except Exception:
+            bg_minutes, interval_sec = None, None
 
-        # Keep the browser open for user interaction
-        page.wait_for_timeout(3600_000)  # 1 hour, Ctrl+C to exit
+        if bg_minutes is None:
+            bg_minutes = 30
+        if interval_sec is None:
+            interval_sec = 60
+
+        print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
+        deadline = time.monotonic() + bg_minutes * 60
+        try:
+            while time.monotonic() < deadline and not stop_event.is_set():
+                try:
+                    page.evaluate("console.info('AUTO:bg tick')")
+                except Exception:
+                    pass
+                try:
+                    restart_scan(context, page, filters, stop_event)
+                except Exception as e:
+                    print(f"[bg] ошибка цикла: {e}")
+                # Спим мелкими шагами, чтобы Ctrl+C отзывался быстрее
+                slept = 0.0
+                # Более частые проверки для мгновенной остановки по Enter
+                while slept < interval_sec and not stop_event.is_set():
+                    step = 0.1 if interval_sec >= 0.1 else interval_sec
+                    time.sleep(step)
+                    slept += step
+        except KeyboardInterrupt:
+            pass
+        print("[bg] Завершение фонового сканирования")
 
 
 def main() -> int:
@@ -386,6 +433,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--fonbet-login", dest="fonbet_login", help="Логин (email/телефон) для fon.bet (или FONBET_LOGIN)")
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
+    parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
+    parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     return parser
 
 
@@ -731,12 +780,15 @@ def extract_favorite_and_opponents(page, lp: Optional[str] = None, rp: Optional[
     return (fav, opponent, title, reason)
 
 
-def scan_and_save_stats(context, links: List[str], output_csv: str, processed_path: str) -> None:
+def scan_and_save_stats(context, links: List[str], output_csv: str, processed_path: str, stop_event: Optional[threading.Event] = None) -> None:
     processed = load_processed_urls(processed_path)
     skipped_processed = 0
     visited = 0
     saved = 0
     for url in links:
+        if stop_event is not None and stop_event.is_set():
+            print("[stop] Прервано пользователем (Enter)")
+            break
         if url in processed:
             skipped_processed += 1
             if os.getenv("AUTOBET_DEBUG"):
@@ -745,13 +797,20 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
         try:
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            if stop_event is not None and stop_event.is_set():
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                break
             try:
                 page.bring_to_front()
             except Exception:
                 pass
 
-            # Дожидаемся (до 1 секунды), пока расширение отрисует блок (GO/3/3/2/3)
-            wait_for_decision_block(page, timeout_ms=1000)
+            # Дожидаемся (до ~2 сек), пока расширение отрисует блок (GO/3/3/2/3)
+            # Независимый расчёт Формы(3) и логистики может занимать >1 сек
+            wait_for_decision_block(page, timeout_ms=2000)
             lp, rp = parse_players_from_stats_url(url)
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
             if fav and opp and reason:
@@ -759,7 +818,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 hhmm = datetime.now().strftime("%H:%M")
                 reason_with_time = f"{reason}, {hhmm}"
                 save_match_row(url, fav, opp, reason_with_time, output_csv)
-                processed.add(url)
+                processed.add(url)  # помечаем как обработанный только при успешном сохранении
                 print(f"[saved:{reason}] {fav} vs {opp} ({url})")
                 saved += 1
             else:
@@ -779,7 +838,9 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 page.close()
             except Exception:
                 pass
-        visited += 1
+            # Не помечаем как processed, если не было сохранения —
+            # чтобы в последующих пересканах можно было переоценить матч
+            visited += 1
     save_processed_urls(processed, processed_path)
     print(f"Итог: собрано ссылок={len(links)}, открыто={visited}, сохранено={saved}, пропущено как processed={skipped_processed}")
 
@@ -836,13 +897,13 @@ def save_processed_urls(data: Set[str], processed_path: str) -> None:
         pass
 
 
-def restart_scan(context, page, filters: Optional[List[str]] = None) -> None:
+def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event: Optional[threading.Event] = None) -> None:
     if not _SCAN_LOCK.acquire(blocking=False):
         print("[restart] Уже идёт сканирование — пропускаю запрос")
         return
     try:
-        # Всегда очищаем результаты и историю processed перед каждым запуском
-        _init_output_files()
+        # Не очищаем результаты при повторных пересканах.
+        # Файлы перезатираются ТОЛЬКО при запуске программы (см. run()).
 
         # 1) LIVE: текущая страница
         page.wait_for_timeout(800)
@@ -857,7 +918,7 @@ def restart_scan(context, page, filters: Optional[List[str]] = None) -> None:
             print(f"[LIVE] Ошибка сбора матчей: {e}")
             links = []
         try:
-            scan_and_save_stats(context, links, OUTPUT_LIVE_CSV, PROCESSED_LIVE_JSON)
+            scan_and_save_stats(context, links, OUTPUT_LIVE_CSV, PROCESSED_LIVE_JSON, stop_event)
         except Exception as e:
             print(f"[LIVE] Ошибка обработки матчей: {e}")
 
@@ -887,7 +948,7 @@ def restart_scan(context, page, filters: Optional[List[str]] = None) -> None:
                     print(f"[PREM] Ошибка сбора матчей: {e}")
                     links2 = []
                 try:
-                    scan_and_save_stats(context, links2, OUTPUT_PREMA_CSV, PROCESSED_PREMA_JSON)
+                    scan_and_save_stats(context, links2, OUTPUT_PREMA_CSV, PROCESSED_PREMA_JSON, stop_event)
                 except Exception as e:
                     print(f"[PREM] Ошибка обработки матчей: {e}")
             finally:

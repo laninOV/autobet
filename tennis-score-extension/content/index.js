@@ -145,11 +145,14 @@ function renderMinTwoSets(match) {
   const ml3Diff   = Number((ml?.pFav3 ?? NaN) - (ml?.pOpp3 ?? NaN));
   const mlFav3    = Number(ml?.pFav3 ?? NaN);
 
+  // Новая логика (синхронизировано с попапом):
+  // 1) Без BT (3): перевес по окну 3 не меньше 15%
   const passNoBt3 = ok(noBt3Diff) && noBt3Diff >= 15;
+  // 2) Форма (3): перевес по форме не меньше 15%
   const passForm3 = ok(form3Diff) && form3Diff >= 15;
-  // Логистическая (3): считаем выполненной, если вероятность фаворита по логистике ≥ 55%
-  const passMl3   = ok(mlFav3) && mlFav3 >= 55;
-  const mlRed     = ok(ml3Diff)   ? (ml3Diff < 0) : false; // красная логистика
+  // 3) Прогноз (логистическая модель, 3): вероятность фаворита > 53%
+  const passMl3   = ok(mlFav3) && mlFav3 > 53;
+  const mlRed     = ok(ml3Diff) ? (ml3Diff < 0) : false; // красная логистика
 
   // Background (10-game) context
   const p10Fav = Number(fav?.p10 ?? NaN);
@@ -160,13 +163,17 @@ function renderMinTwoSets(match) {
   const d5_10_fav = Number(fav?.d5_10 ?? NaN);
   const shockOpp = (ok(d5_10_opp) && d5_10_opp >= 15) || (ok(d5_10_fav) && d5_10_fav <= -15);
 
-  const matched = [passNoBt3, passForm3, passMl3].filter(Boolean).length;
+  // Не даём двойной счёт, только если форма(3) — явный аппрокс через non-BT(3)
+  const formApprox = !!(match?.form && match.form._approx);
+  const matched = (passNoBt3 ? 1 : 0) + ((passForm3 && !formApprox) ? 1 : 0) + (passMl3 ? 1 : 0);
 
   let verdict = 'Осторожно';
   let color = '#aa0';
-  // Обязательное условие для решения в пользу фаворита — Вероятность(3) ≥ 55%
-  const mustMlFav = ok(mlFav3) && mlFav3 >= 55;
-  if (!mustMlFav || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
+  // Обязательные условия: Логистика(3) > 53% и P(3) > 55% в блоке индекса
+  const mustMlFav = ok(mlFav3) && mlFav3 > 53;
+  const favP3Val = Number(fav?.p3);
+  const passIdxBlock = Number.isFinite(favP3Val) && favP3Val > 55;
+  if (!mustMlFav || !passIdxBlock || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
   else if (matched >= 2 && mlRed) { verdict = 'Осторожно'; color = '#aa0'; }
   else if (matched >= 2 && !mlRed) { verdict = 'GO'; color = '#0a0'; }
 
@@ -620,7 +627,26 @@ function renderMinTwoSets(match) {
     // Orientation by 10-game non-BT (for Decision Summary)
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Try to compute independent Form(3) from last 3 matches' sets share; fallback to non-BT(3)
+    const computeFormP3 = (arr) => {
+      try{
+        const L = Array.isArray(arr)? arr.slice(0,3) : [];
+        let own=0, opp=0;
+        for (const m of L){
+          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
+          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
+        }
+        const tot = own + opp;
+        if (tot <= 0) return null;
+        return Math.round(100 * (own / tot));
+      }catch(_){ return null; }
+    };
+    let favForm3 = computeFormP3(data?.recentsA10);
+    let oppForm3 = computeFormP3(data?.recentsB10);
+    if (!favIsA){ const t1=favForm3; favForm3 = oppForm3; oppForm3 = t1; }
+    const form10 = (Number.isFinite(favForm3) && Number.isFinite(oppForm3))
+      ? { p3Fav: favForm3, p3Opp: oppForm3, _approx: false }
+      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
     // Align logistic probabilities with the selected favorite.
     // Prefer calibrated forecast (if available), fallback to predWinProbA/B.
     const pA_fore = (typeof data?.forecast?.pA === 'number') ? Math.round(data.forecast.pA * 100) : undefined;
@@ -773,7 +799,26 @@ function renderMinTwoSets(match) {
     const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Independent Form(3) if available; else fallback
+    const computeFormP3b = (arr) => {
+      try{
+        const L = Array.isArray(arr)? arr.slice(0,3) : [];
+        let own=0, opp=0;
+        for (const m of L){
+          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
+          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
+        }
+        const tot = own + opp;
+        if (tot <= 0) return null;
+        return Math.round(100 * (own / tot));
+      }catch(_){ return null; }
+    };
+    let favForm3b = computeFormP3b(data?.recentsA10);
+    let oppForm3b = computeFormP3b(data?.recentsB10);
+    if (!favIsA){ const t1=favForm3b; favForm3b = oppForm3b; oppForm3b = t1; }
+    const form10 = (Number.isFinite(favForm3b) && Number.isFinite(oppForm3b))
+      ? { p3Fav: favForm3b, p3Opp: oppForm3b, _approx: false }
+      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
     // Logistic probabilities for the 3-game window
     let pA3 = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
     let pB3 = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
@@ -830,7 +875,26 @@ function renderMinTwoSets(match) {
     const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Independent Form(3) if available; else fallback
+    const computeFormP3c = (arr) => {
+      try{
+        const L = Array.isArray(arr)? arr.slice(0,3) : [];
+        let own=0, opp=0;
+        for (const m of L){
+          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
+          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
+        }
+        const tot = own + opp;
+        if (tot <= 0) return null;
+        return Math.round(100 * (own / tot));
+      }catch(_){ return null; }
+    };
+    let favForm3c = computeFormP3c(data?.recentsA10);
+    let oppForm3c = computeFormP3c(data?.recentsB10);
+    if (!favIsA){ const t1=favForm3c; favForm3c = oppForm3c; oppForm3c = t1; }
+    const form10 = (Number.isFinite(favForm3c) && Number.isFinite(oppForm3c))
+      ? { p3Fav: favForm3c, p3Opp: oppForm3c, _approx: false }
+      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
     // Logistic probabilities for the 3-game window (consistent with keys label)
     const pA3_win = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
     const pB3_win = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;

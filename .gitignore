@@ -1,0 +1,20 @@
+# OS cruft
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Playwright auth/profile and browser cache
+tennis_auth_state.json
+.chromium-profile/
+.chromium-profile-*/
+
+# Output artifacts
+*.csv
+processed_*.json
+
+# Archives
+*.zip
+

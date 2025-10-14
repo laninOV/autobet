@@ -2893,7 +2893,9 @@ document.addEventListener('DOMContentLoaded', () => {
       // Абсолютное условие для логистической (3): > 53% за фаворита
       const passMl3 = favMl3Pct > 53;
       const mlRed = gapML3 < 0;
-      const matched = (passNoBt3?1:0) + (passForm3?1:0) + (passMl3?1:0);
+      // Если форма(3) аппроксимируется тем же non-BT(3) (или численно совпадает), не удваиваем счётчик.
+      const sameMetric = Number.isFinite(gapNB3) && Number.isFinite(gapForm) && Math.abs(gapNB3 - gapForm) < 1e-9;
+      const matched = (passNoBt3?1:0) + ((passForm3 && !sameMetric)?1:0) + (passMl3?1:0);
       // Индекс силы и форма: фаворит по окну 10 должен иметь P(3) > 55%
       const favP3Val = Number(fav?.p3);
       const passIdxBlock = Number.isFinite(favP3Val) && favP3Val > 55;
@@ -3013,6 +3015,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const nb3Fav = favIsA ? a3 : b3;
       const nb3Opp = favIsA ? b3 : a3;
       const gapNB3 = (Number.isFinite(nb3Fav) && Number.isFinite(nb3Opp)) ? (nb3Fav - nb3Opp) : NaN;
+      // В этом упрощённом пути формы(3) нет — используем приближение через non-BT(3).
+      // Это не должно удваивать сигнал, поэтому ниже не будем его считать отдельно в matched.
       const gapForm = gapNB3; // приближение формы(3) через non-BT(3)
 
       // Logistic(3) from content
@@ -3022,14 +3026,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const ml3Diff = (Number.isFinite(pA3) && Number.isFinite(pB3)) ? ( (favIsA? (pA3-pB3) : (pB3-pA3)) ) : NaN;
 
       const passNoBt3 = Number.isFinite(gapNB3) && gapNB3 >= 15;
-      const passForm3 = Number.isFinite(gapForm) && gapForm >= 15;
+      const passForm3 = Number.isFinite(gapForm) && gapForm >= 15; // дублирует non-BT в этом режиме
       const passMl3   = Number.isFinite(favMl3Pct) && favMl3Pct > 53; // >53% обязательное
 
       // Индекс силы/форма (10): P(3) у фаворита >55%
       const favP3 = favIsA ? a3 : b3;
       const passIdx = Number.isFinite(favP3) && favP3 > 55;
 
-      const matched = (passNoBt3?1:0)+(passForm3?1:0)+(passMl3?1:0);
+      // Не даём двойной счёт за один и тот же сигнал (форма≈non-BT):
+      const matched = (passNoBt3?1:0) + (passMl3?1:0) + 0;
       let v2 = 'Осторожно';
       let color = '#aa0';
       if (!passMl3 || !passIdx || matched <= 1) { v2='PASS'; color='#a00'; }
