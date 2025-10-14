@@ -126,88 +126,7 @@
 ```
 */
 
-// --- Enhanced Decision Summary Renderer ---
-function renderDecisionSummary(match) {
-  const fav = match?.fav || {};
-  const opp = match?.opp || {};
-  const ml = match?.ml || {};
-  const form = match?.form || {};
-  const baseProb = Number(match?.baseProb ?? match?.base_eval ?? NaN);
-  const confidence = Number(match?.confidence ?? NaN);
-
-  const d5_10 = Number(fav?.d5_10 ?? NaN);
-  const d3_5 = Number(fav?.d3_5 ?? NaN);
-  const formDiff = Number((form?.p3Fav ?? NaN) - (form?.p3Opp ?? NaN));
-  const noBt3Diff = Number((fav?.p3 ?? NaN) - (opp?.p3 ?? NaN));
-  const ml3Diff = Number((ml?.pFav3 ?? NaN) - (ml?.pOpp3 ?? NaN));
-  const mlFav3 = Number(ml?.pFav3 ?? NaN);
-
-  const ok = (v) => Number.isFinite(v);
-  const signPct = (v, d=0) => ok(v) ? `${v>0?'+':''}${v.toFixed(d)}%` : '—';
-  const fmtPct = (v, d=0) => ok(v) ? `${v.toFixed(d)}%` : '—';
-  const arrow = (v) => ok(v) ? (v > 0 ? '↑' : (v < 0 ? '↓' : '→')) : '—';
-
-  const c1 = ok(baseProb) && baseProb >= 50;
-  const c2 = ok(d5_10) && ok(d3_5) && d5_10 >= -2 && d3_5 >= 0;
-  const c3 = ok(formDiff) && formDiff >= 15;
-  const c4 = ok(noBt3Diff) && noBt3Diff >= 15;
-  // Логистическая модель (3): обязательное условие — вероятность фаворита > 54%
-  const c5 = ok(mlFav3) && mlFav3 > 54;
-  const c6 = ok(confidence) && confidence >= 60;
-
-  const checks = [c1, c2, c3, c4, c5, c6];
-  const score = checks.filter(Boolean).length;
-  const keyCount = [c3, c4, c5].filter(Boolean).length; // ключевые сигналы: форма(3), без BT(3), логистика(3)
-  const idxRaw = 0.4 * (score / 6) + 0.6 * (keyCount / 3);
-  const index = Math.max(0, Math.min(1, idxRaw));
-  const indexPct = Math.round(100 * index);
-
-  let verdict = '🟡 Осторожно — возможен апсет';
-  let color = '#aa0';
-  if (score >= 5 || index >= 0.75) { verdict = '🟢 Надёжно — высокая вероятность победы'; color = '#0a0'; }
-  else if (score <= 2 || index < 0.45) { verdict = '🔴 Рисково — перевес слабый, фаворит уязвим'; color = '#a00'; }
-
-  const idxBand = index >= 0.75 ? 'высокий' : (index < 0.45 ? 'низкий' : 'средний');
-  const li = (ok, text) => `<li>${ok ? '✅' : '❌'} ${text}</li>`;
-
-  const favName = match?.favName || 'Фаворит';
-  const mustMlFav = ok(mlFav3) && mlFav3 > 54; // обязательное условие
-  const failParts = [];
-  if (!(ok(d5_10) && ok(d3_5) && d5_10 >= -2 && d3_5 >= 0)) {
-    failParts.push(`Тренд без BT: Δ(5−10) ${ok(d5_10) ? signPct(d5_10) : '—'}; Δ(3−5) ${ok(d3_5) ? signPct(d3_5) : '—'}`);
-  }
-  if (!mustMlFav) {
-    failParts.push(`Логистическая: Вероятность (3) ≤ 54% (fav ${ok(mlFav3) ? fmtPct(mlFav3) : '—'})`);
-  }
-  const items = [
-    li(c1, `Модель подтверждает фаворита ≥50% ${ok(baseProb) ? `(${fmtPct(baseProb)})` : ''}`),
-    li(c2, `Δ(5−10) ≥ −2% и Δ(3−5) ≥ 0% ${ok(d5_10)&&ok(d3_5) ? `(Δ5−10: ${signPct(d5_10)}, Δ3−5: ${signPct(d3_5)})` : ''}`),
-    li(c3, `Форма (3) за фаворита ${ok(formDiff) ? signPct(formDiff) : ''}`),
-    li(c4, `Без BT (3) перевес ${ok(noBt3Diff) ? signPct(noBt3Diff) : ''}`),
-    li(c5, `Логистическая: Вероятность (3) ${ok(mlFav3) ? fmtPct(mlFav3) : ''} (>54% для выполнения)`),
-    li(c6, `Уверенность ${ok(confidence) ? fmtPct(confidence) : ''}`)
-  ].join('');
-
-  const keySignals = [
-    `форма(3) ${arrow(formDiff)}`,
-    `без BT(3) ${arrow(noBt3Diff)}`,
-    `логистическая(3) ${arrow(ml3Diff)}`
-  ].join(', ');
-
-  return `
-    <div class="decision-summary"
-         style="background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;">
-      <div style="font-size:14px;">🔎 Совпадения: ${score}/6 • Фаворит: ${favName}</div>
-      <ul style="margin:6px 0 8px 16px;padding:0;font-weight:500;list-style: none;">
-        ${items}
-      </ul>
-      ${failParts.length ? `<div style="margin-top:4px;">❌ Не выполнено: ${failParts.join('; ')}</div>` : ''}
-      <div style="font-weight:600;">📈 Индекс уверенности: ${indexPct}% <span style="opacity:.9;font-weight:600;">(${idxBand})</span></div>
-      <div style="margin-top:4px;">💬 Вердикт: ${verdict}</div>
-      <div style="margin-top:4px;opacity:.95;">Ключевые сигналы: ${keySignals}</div>
-    </div>
-  `;
-}
+// (Удалено) Decision Summary block — по просьбе пользователя
 
 // --- "Возьмёт минимум 2 сета" Renderer ---
 function renderMinTwoSets(match) {
@@ -228,8 +147,8 @@ function renderMinTwoSets(match) {
 
   const passNoBt3 = ok(noBt3Diff) && noBt3Diff >= 15;
   const passForm3 = ok(form3Diff) && form3Diff >= 15;
-  // Логистическая (3): обязательна вероятность за фаворита >54%
-  const passMl3   = ok(ml3Diff) && ml3Diff >= 15 && ok(mlFav3) && mlFav3 > 54; // строгий порог + обязательное условие
+  // Логистическая (3): считаем выполненной, если вероятность фаворита по логистике ≥ 55%
+  const passMl3   = ok(mlFav3) && mlFav3 >= 55;
   const mlRed     = ok(ml3Diff)   ? (ml3Diff < 0) : false; // красная логистика
 
   // Background (10-game) context
@@ -245,25 +164,23 @@ function renderMinTwoSets(match) {
 
   let verdict = 'Осторожно';
   let color = '#aa0';
-  // Обязательное условие для любого решения в пользу фаворита — Вероятность(3) > 54%
-  const mustMlFav = ok(mlFav3) && mlFav3 > 54;
+  // Обязательное условие для решения в пользу фаворита — Вероятность(3) ≥ 55%
+  const mustMlFav = ok(mlFav3) && mlFav3 >= 55;
   if (!mustMlFav || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
   else if (matched >= 2 && mlRed) { verdict = 'Осторожно'; color = '#aa0'; }
   else if (matched >= 2 && !mlRed) { verdict = 'GO'; color = '#0a0'; }
 
   const mlBadge = mlRed ? ' (красная)' : '';
   const favName = match?.favName || 'Фаворит';
-  const header = `🔎 Решение: ${verdict}  • Фаворит: ${favName}`;
-  const sub = `Совпадений по 3-окну: ${matched}/3`;
-  const keys = `Ключи: БезBT(3) ${signPct(noBt3Diff)}, Форма(3) ${signPct(form3Diff)}, Логист.(3) ${signPct(ml3Diff)}${mlBadge}`;
+  const header = `🔎 Решение: ${verdict} | Совпадений: ${matched}/3 • Фаворит: ${favName}`;
+  const keys = `Ключи: БезBT(3) ${signPct(noBt3Diff)}, Форма(3) ${signPct(form3Diff)}, Логист.(3) ${fmtPct(mlFav3)}${ok(ml3Diff)?` (${signPct(ml3Diff)})`:''}${mlBadge}`;
   const bg = `Фон (10): ${fmtPct(p10Fav)} vs ${fmtPct(p10Opp)}` + (shockOpp ? ` • У оппа форм-шок Δ(5−10) ${signPct(d5_10_opp)}` : '');
 
   return `
-    <div class="take-two-sets" style="background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin:8px 0;">
-      <div style="font-size:14px;">${header}</div>
-      <div style="margin-top:2px;">${sub}</div>
-      <div style="margin-top:2px;">${keys}</div>
-      <div style="margin-top:2px;opacity:.95;font-weight:500;">${bg}</div>
+    <div class="take-two-sets" style="background:${color};color:#fff;display:block;width:100%;box-sizing:border-box;padding:12px 16px;border-radius:12px;font:600 14px/1.4 system-ui;margin:10px 0;">
+      <div style="font-size:15px;">${header}</div>
+      <div style="margin-top:4px;">${keys}</div>
+      <div style="margin-top:4px;opacity:.95;font-weight:600;">${bg}</div>
     </div>
   `;
 }
@@ -621,13 +538,23 @@ function renderMinTwoSets(match) {
 
   const install = () => {
     ensureButton();
+    // If a previous version injected summaries, remove them to restore original page
+    try {
+      const ex = document.getElementById('tsx-auto-summaries');
+      if (ex) ex.remove();
+    } catch {}
     // Expose parser for console usage
     try {
       window.__tennisScoreExtract = parseAll;
-      window.__renderDecisionSummary = renderDecisionSummary;
       window.__renderMinTwoSets = renderMinTwoSets;
+      // Expose manual insertion of summary blocks (disabled by default)
+      window.__insertAutoBlocks = insertAutoBlocks;
+      window.__insertMinTwoBeforeName = insertMinTwoBeforeName;
     } catch {}
-    try { insertAutoBlocks(); } catch(_) {}
+    // Auto-insert compact decision block on match pages, centered at top of container
+    try { autoInsertDecisionOnMatchPage(); } catch {}
+    // Keep targeted insertion for specific stats page demo (no-op if not applicable)
+    try { autoInsertForTSProStats(); } catch {}
   };
 
   // Observe significant DOM changes (site can be dynamic)
@@ -640,6 +567,18 @@ function renderMinTwoSets(match) {
     );
     if (addedAnyTable || !document.getElementById(BTN_ID)) {
       ensureButton();
+    }
+    const addedPlayerName = mut.some((m) =>
+      Array.from(m.addedNodes || []).some((n) => n.nodeType === 1 && (n.matches?.('.gamer-name.pr-2') || n.querySelector?.('.gamer-name.pr-2')))
+    );
+    if (addedPlayerName) {
+      try { autoInsertForTSProStats(); } catch {}
+    }
+    const containerAppeared = mut.some((m) =>
+      Array.from(m.addedNodes || []).some((n) => n.nodeType === 1 && (n.matches?.('.container-xl.mb-5') || n.querySelector?.('.container-xl.mb-5')))
+    );
+    if (containerAppeared) {
+      try { autoInsertDecisionOnMatchPage(); } catch {}
     }
   });
 
@@ -665,17 +604,125 @@ function renderMinTwoSets(match) {
     const favIsA = a10 >= b10;
     const nameA = data?.playerA?.name || 'Игрок 1';
     const nameB = data?.playerB?.name || 'Игрок 2';
-    const fav = { p10: favIsA ? a10 : b10, p5: favIsA ? a5 : b5, p3: favIsA ? a3 : b3 };
-    const opp = { p10: favIsA ? b10 : a10, p5: favIsA ? b5 : a5, p3: favIsA ? b3 : a3 };
-    fav.d5_10 = (Number.isFinite(fav.p5) && Number.isFinite(fav.p10)) ? (fav.p5 - fav.p10) : undefined;
-    fav.d3_5  = (Number.isFinite(fav.p3) && Number.isFinite(fav.p5))  ? (fav.p3 - fav.p5)  : undefined;
-    const form = { p3Fav: fav.p3, p3Opp: opp.p3 };
-    const ml = { pFav3: Number.isFinite(data.predWinProbA) ? data.predWinProbA : undefined,
-                 pOpp3: Number.isFinite(data.predWinProbB) ? data.predWinProbB : undefined };
-    const match = { fav, opp, form, ml, baseProb: fav.p10, confidence: undefined, favName: (favIsA? nameA : nameB), oppName: (favIsA? nameB : nameA) };
+    // Build per-player non-BT windows for reorientation flexibility
+    const A = {
+      p10: a10, p5: a5, p3: a3,
+      d5_10: (Number.isFinite(a5) && Number.isFinite(a10)) ? (a5 - a10) : undefined,
+      d3_5:  (Number.isFinite(a3) && Number.isFinite(a5))  ? (a3 - a5)  : undefined,
+      name: nameA
+    };
+    const B = {
+      p10: b10, p5: b5, p3: b3,
+      d5_10: (Number.isFinite(b5) && Number.isFinite(b10)) ? (b5 - b10) : undefined,
+      d3_5:  (Number.isFinite(b3) && Number.isFinite(b5))  ? (b3 - b5)  : undefined,
+      name: nameB
+    };
+    // Orientation by 10-game non-BT (for Decision Summary)
+    const fav10 = favIsA ? { ...A } : { ...B };
+    const opp10 = favIsA ? { ...B } : { ...A };
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Align logistic probabilities with the selected favorite.
+    // Prefer calibrated forecast (if available), fallback to predWinProbA/B.
+    const pA_fore = (typeof data?.forecast?.pA === 'number') ? Math.round(data.forecast.pA * 100) : undefined;
+    const pB_fore = (typeof data?.forecast?.pB === 'number') ? Math.round(data.forecast.pB * 100) : undefined;
+    const pA = Number.isFinite(pA_fore) ? pA_fore : (Number.isFinite(data.predWinProbA) ? data.predWinProbA : undefined);
+    const pB = Number.isFinite(pB_fore) ? pB_fore : (Number.isFinite(data.predWinProbB) ? data.predWinProbB : undefined);
+    // Compute logistic probability specifically on N=3 window to match UI table
+    const recA = Array.isArray(data.recentsA10) ? data.recentsA10 : [];
+    const recB = Array.isArray(data.recentsB10) ? data.recentsB10 : [];
+    const h2hA = Array.isArray(data.h2hOrientedA) ? data.h2hOrientedA : [];
+    const h2hB = Array.isArray(data.h2hOrientedB) ? data.h2hOrientedB : [];
+    const computeWeightedFeaturesN = (arr, N=10, alpha=0.85) => {
+      const L = (arr || []).slice(0, N);
+      const n = L.length;
+      if (!n) return { F: 0, S: 0, D: 0, T: 0, setsTotal: 0 };
+      let winsW = 0, lossesW = 0;
+      let setsWinW = 0, setsLossW = 0, setsTotW = 0;
+      let ptsDiffW = 0, ptsTotCountW = 0, tightCntW = 0;
+      for (let i = 0; i < n; i++) {
+        const m = L[i];
+        const w = Math.pow(alpha, n - 1 - i);
+        const em = enrichMatch(m);
+        winsW += w * (em.win ? 1 : 0);
+        lossesW += w * (em.win ? 0 : 1);
+        setsWinW += w * em.ownSets;
+        setsLossW += w * em.oppSets;
+        const sets = Array.isArray(m.setsOwnOpponent) ? m.setsOwnOpponent : [];
+        for (const [a0, b0] of sets) {
+          const a = Number(a0) || 0, b = Number(b0) || 0;
+          ptsDiffW += w * (a - b);
+          ptsTotCountW += w * 1;
+          if (Math.abs(a - b) <= 2) tightCntW += w * 1;
+        }
+        setsTotW += w * (em.ownSets + em.oppSets);
+      }
+      const F = (winsW + lossesW) > 0 ? (winsW - lossesW) / (winsW + lossesW) : 0;
+      const S = setsTotW > 0 ? (setsWinW - setsLossW) / setsTotW : 0;
+      const D = ptsTotCountW > 0 ? (ptsDiffW / ptsTotCountW) / 11 : 0;
+      const T = ptsTotCountW > 0 ? (tightCntW / ptsTotCountW) : 0;
+      const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+      return { F: clamp(F, -1, 1), S: clamp(S, -1, 1), D: clamp(D, -1, 1), T: clamp(T, -1, 1), setsTotal: setsTotW };
+    };
+    const windowLogistic = (recA, recB, h2hA, h2hB, N=3) => {
+      try {
+        const featA = computeWeightedFeaturesN(recA, N);
+        const featB = computeWeightedFeaturesN(recB, N);
+        const h2hFeatA = computeWeightedFeaturesN(h2hA, Math.min(N, 10));
+        const h2hFeatB = computeWeightedFeaturesN(h2hB, Math.min(N, 10));
+        const dF = (featA.F - featB.F);
+        const dS = (featA.S - featB.S);
+        const dD = (featA.D - featB.D);
+        const dT = (featA.T - featB.T);
+        const dFh = (h2hFeatA.F - h2hFeatB.F) || 0;
+        const dSh = (h2hFeatA.S - h2hFeatB.S) || 0;
+        const dDh = (h2hFeatA.D - h2hFeatB.D) || 0;
+        const dTh = (h2hFeatA.T - h2hFeatB.T) || 0;
+        const beta = { b0: 0.0, b1: 2.0, b2: 1.5, b3: 0.4, b4: -0.8, g1: 1.5, g2: 1.0, g3: 0.3, g4: -0.5 };
+        const z = beta.b0 + beta.b1*dF + beta.b2*dS + beta.b3*dD + beta.b4*dT + beta.g1*dFh + beta.g2*dSh + beta.g3*dDh + beta.g4*dTh;
+        const pRaw = 1/(1+Math.exp(-z));
+        const setsVol = Math.max(0, Math.min(1, (featA.setsTotal + featB.setsTotal) / 40));
+        const h2hVol = Math.max(0, Math.min(1, ((h2hFeatA.setsTotal||0) + (h2hFeatB.setsTotal||0)) / 20));
+        const tau = 2.0 - 0.6*setsVol - 0.3*h2hVol;
+        const shrink = 0.65 + 0.15*(setsVol + 0.5*h2hVol);
+        const clipLo = 0.22 - 0.04*(setsVol + 0.5*h2hVol);
+        const clipHi = 1 - clipLo;
+        const pTemp = 1/(1+Math.exp(-(z/Math.max(1e-6,tau))));
+        let pCal = 0.5 + shrink*(pTemp - 0.5);
+        pCal = Math.max(clipLo, Math.min(clipHi, pCal));
+        const pA01 = pCal; const pB01 = 1 - pA01;
+        return [Math.round(pA01*100), Math.round(pB01*100)];
+      } catch(_) { return [undefined, undefined]; }
+    };
+    // Prefer values computed in buildAnalyzeData for exact N=3 window
+    let pA3_win = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
+    let pB3_win = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
+    if (!Number.isFinite(pA3_win) || !Number.isFinite(pB3_win)) {
+      // Fallback to local computation
+      const pair = windowLogistic(recA, recB, h2hA, h2hB, 3);
+      pA3_win = pair[0]; pB3_win = pair[1];
+    }
+    if (!Number.isFinite(pA3_win) || !Number.isFinite(pB3_win)) {
+      // Final fallback to general forecast or pred
+      pA3_win = pA; pB3_win = pB;
+    }
+    // Build logistic(3)-oriented mapping for the 3-window block
+    const fav3IsA = Number(pA3_win) >= Number(pB3_win);
+    const fav3 = fav3IsA ? { ...A } : { ...B };
+    const opp3 = fav3IsA ? { ...B } : { ...A };
+    const form3 = { p3Fav: fav3.p3, p3Opp: opp3.p3 };
+    const ml10 = favIsA
+      ? { pFav3: pA3_win, pOpp3: pB3_win }
+      : { pFav3: pB3_win, pOpp3: pA3_win };
+    const ml3 = fav3IsA
+      ? { pFav3: pA3_win, pOpp3: pB3_win }
+      : { pFav3: pB3_win, pOpp3: pA3_win };
 
-    const htmlTop = renderMinTwoSets(match);
-    const htmlDec = renderDecisionSummary(match);
+    // Separate matches for the two summaries
+    // Top block (3-window) should be anchored to the main (non-BT 10) favorite
+    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml10, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+    const match10 = { fav: fav10, opp: opp10, form: form10, ml: ml10, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+
+    const htmlTop = renderMinTwoSets(matchTop);
 
     const containerId = 'tsx-auto-summaries';
     let holder = document.getElementById(containerId);
@@ -690,7 +737,123 @@ function renderMinTwoSets(match) {
         document.body.insertBefore(holder, document.body.firstChild);
       }
     }
-    holder.innerHTML = htmlTop + htmlDec;
+    holder.innerHTML = htmlTop;
+  }
+
+  // Auto-insert compact decision block at the top of the main match container, centered
+  function autoInsertDecisionOnMatchPage() {
+    const host = (location.hostname || '').toLowerCase();
+    const path = location.pathname || '';
+    // Focus on match pages we support
+    const isSupportedHost = /tennis-score\.pro$|score-tennis\.com$/i.test(host);
+    if (!isSupportedHost) return;
+    const isMatchPage = /\/mstat\//i.test(path) || /\/mstat$/i.test(path) || document.querySelector('.container-xl.mb-5');
+    if (!isMatchPage) return;
+
+    const container = document.querySelector('.container-xl.mb-5');
+    if (!container) return;
+    if (document.getElementById('tsx-decision-holder')) return; // already inserted
+
+    // Build data for the decision block
+    let data = null;
+    try { data = buildAnalyzeData({}); } catch(_) { return; }
+    if (!data || !data.playerA || !data.playerB) return;
+
+    const a10 = Number(data.playerA.nonBTProbability10 ?? data.playerA.nonBTProbability);
+    const b10 = Number(data.playerB.nonBTProbability10 ?? data.playerB.nonBTProbability);
+    if (!Number.isFinite(a10) || !Number.isFinite(b10)) return;
+    const a5  = Number(data.playerA.nonBTProbability5);
+    const b5  = Number(data.playerB.nonBTProbability5);
+    const a3  = Number(data.playerA.nonBTProbability3);
+    const b3  = Number(data.playerB.nonBTProbability3);
+    const favIsA = a10 >= b10;
+    const nameA = data?.playerA?.name || 'Игрок 1';
+    const nameB = data?.playerB?.name || 'Игрок 2';
+    const A = { p10: a10, p5: a5, p3: a3, d5_10: (Number.isFinite(a5)&&Number.isFinite(a10))?(a5-a10):undefined, d3_5: (Number.isFinite(a3)&&Number.isFinite(a5))?(a3-a5):undefined, name: nameA };
+    const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
+    const fav10 = favIsA ? { ...A } : { ...B };
+    const opp10 = favIsA ? { ...B } : { ...A };
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Logistic probabilities for the 3-game window
+    let pA3 = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
+    let pB3 = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
+    if (!Number.isFinite(pA3) || !Number.isFinite(pB3)) { pA3 = undefined; pB3 = undefined; }
+    const ml3 = favIsA ? { pFav3: pA3, pOpp3: pB3 } : { pFav3: pB3, pOpp3: pA3 };
+
+    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+    const html = renderMinTwoSets(matchTop);
+
+    const holder = document.createElement('div');
+    holder.id = 'tsx-decision-holder';
+    holder.style.display = 'flex';
+    holder.style.justifyContent = 'center';
+    holder.style.margin = '10px 0';
+    const inner = document.createElement('div');
+    inner.style.maxWidth = '760px';
+    inner.style.width = '100%';
+    inner.innerHTML = html;
+    holder.appendChild(inner);
+    container.insertBefore(holder, container.firstChild);
+  }
+
+  // Targeted insertion: place the "take-two-sets" block before a specific player name on tennis-score.pro/stats
+  function autoInsertForTSProStats() {
+    const host = location.hostname || '';
+    const path = location.pathname || '';
+    if (!/tennis-score\.pro$/i.test(host)) return;
+    if (!path.startsWith('/stats')) return;
+    insertMinTwoBeforeName('Дмитрий Кугурушев');
+  }
+
+  function insertMinTwoBeforeName(targetName) {
+    if (!targetName) return;
+    if (document.getElementById('tsx-min2-before-target')) return; // already inserted
+    const candidates = Array.from(document.querySelectorAll('.gamer-name.pr-2'));
+    const target = candidates.find((el) => (el.textContent || '').trim() === targetName);
+    if (!target) return;
+
+    // Build data and render the MinTwoSets block (top compact summary)
+    let data = null;
+    try { data = buildAnalyzeData({}); } catch(_) { return; }
+    if (!data || !data.playerA || !data.playerB) return;
+    const a10 = Number(data.playerA.nonBTProbability10 ?? data.playerA.nonBTProbability);
+    const b10 = Number(data.playerB.nonBTProbability10 ?? data.playerB.nonBTProbability);
+    const a5  = Number(data.playerA.nonBTProbability5);
+    const b5  = Number(data.playerB.nonBTProbability5);
+    const a3  = Number(data.playerA.nonBTProbability3);
+    const b3  = Number(data.playerB.nonBTProbability3);
+    if (!Number.isFinite(a10) || !Number.isFinite(b10)) return;
+    const favIsA = a10 >= b10;
+    const nameA = data?.playerA?.name || 'Игрок 1';
+    const nameB = data?.playerB?.name || 'Игрок 2';
+    const A = { p10: a10, p5: a5, p3: a3, d5_10: (Number.isFinite(a5)&&Number.isFinite(a10))?(a5-a10):undefined, d3_5: (Number.isFinite(a3)&&Number.isFinite(a5))?(a3-a5):undefined, name: nameA };
+    const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
+    const fav10 = favIsA ? { ...A } : { ...B };
+    const opp10 = favIsA ? { ...B } : { ...A };
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Logistic probabilities for the 3-game window (consistent with keys label)
+    const pA3_win = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
+    const pB3_win = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
+    const ml3 = favIsA
+      ? { pFav3: pA3_win, pOpp3: pB3_win }
+      : { pFav3: pB3_win, pOpp3: pA3_win };
+    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+
+    const htmlTop = renderMinTwoSets(matchTop);
+    const holder = document.createElement('div');
+    holder.id = 'tsx-min2-before-target';
+    holder.style.width = '100%';
+    holder.style.boxSizing = 'border-box';
+    holder.innerHTML = htmlTop;
+
+    // Prefer to place above the overall score/header block if present
+    const topHeader = document.querySelector('.table-top');
+    if (topHeader && topHeader.parentNode) {
+      topHeader.parentNode.insertBefore(holder, topHeader);
+    } else {
+      // Fallback: before target player name
+      target.parentNode?.insertBefore(holder, target);
+    }
   }
 
   // Messaging: allow popup to request extraction
@@ -1724,6 +1887,78 @@ function buildAnalyzeData(userOpts = {}) {
       h2hB: h2hFeatB,
       beta
     };
+  } catch(_) {}
+
+  // Compute logistic probabilities for windows N=10/5/3 and expose them
+  try {
+    const computeWeightedFeaturesN = (arr, N=10, alpha = 0.85) => {
+      const L = (arr || []).slice(0, N);
+      const n = L.length;
+      if (!n) return { F: 0, S: 0, D: 0, T: 0, setsTotal: 0 };
+      let winsW = 0, lossesW = 0;
+      let setsWinW = 0, setsLossW = 0, setsTotW = 0;
+      let ptsDiffW = 0, ptsTotCountW = 0, tightCntW = 0;
+      for (let i = 0; i < n; i++) {
+        const m = L[i];
+        const w = Math.pow(alpha, n - 1 - i);
+        const em = enrichMatch(m);
+        winsW += w * (em.win ? 1 : 0);
+        lossesW += w * (em.win ? 0 : 1);
+        setsWinW += w * em.ownSets;
+        setsLossW += w * em.oppSets;
+        const sets = Array.isArray(m.setsOwnOpponent) ? m.setsOwnOpponent : [];
+        for (const [a0, b0] of sets) {
+          const a = Number(a0) || 0, b = Number(b0) || 0;
+          ptsDiffW += w * (a - b);
+          ptsTotCountW += w * 1;
+          if (Math.abs(a - b) <= 2) tightCntW += w * 1;
+        }
+        setsTotW += w * (em.ownSets + em.oppSets);
+      }
+      const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+      const F = (winsW + lossesW) > 0 ? (winsW - lossesW) / (winsW + lossesW) : 0;
+      const S = setsTotW > 0 ? (setsWinW - setsLossW) / setsTotW : 0;
+      const D = ptsTotCountW > 0 ? (ptsDiffW / ptsTotCountW) / 11 : 0;
+      const T = ptsTotCountW > 0 ? (tightCntW / ptsTotCountW) : 0;
+      return { F: clamp(F, -1, 1), S: clamp(S, -1, 1), D: clamp(D, -1, 1), T: clamp(T, -1, 1), setsTotal: setsTotW };
+    };
+    const windowLogistic = (recA, recB, h2hA, h2hB, N=10) => {
+      try {
+        const featA = computeWeightedFeaturesN(recA, N);
+        const featB = computeWeightedFeaturesN(recB, N);
+        const h2hFeatA = computeWeightedFeaturesN(h2hA, Math.min(N, 10));
+        const h2hFeatB = computeWeightedFeaturesN(h2hB, Math.min(N, 10));
+        const dF = (featA.F - featB.F);
+        const dS = (featA.S - featB.S);
+        const dD = (featA.D - featB.D);
+        const dT = (featA.T - featB.T);
+        const dFh = (h2hFeatA.F - h2hFeatB.F) || 0;
+        const dSh = (h2hFeatA.S - h2hFeatB.S) || 0;
+        const dDh = (h2hFeatA.D - h2hFeatB.D) || 0;
+        const dTh = (h2hFeatA.T - h2hFeatB.T) || 0;
+        const beta = { b0: 0.0, b1: 2.0, b2: 1.5, b3: 0.4, b4: -0.8, g1: 1.5, g2: 1.0, g3: 0.3, g4: -0.5 };
+        const z = beta.b0 + beta.b1*dF + beta.b2*dS + beta.b3*dD + beta.b4*dT + beta.g1*dFh + beta.g2*dSh + beta.g3*dDh + beta.g4*dTh;
+        const setsVol = Math.max(0, Math.min(1, (featA.setsTotal + featB.setsTotal) / 40));
+        const h2hVol = Math.max(0, Math.min(1, ((h2hFeatA.setsTotal||0) + (h2hFeatB.setsTotal||0)) / 20));
+        const tau = 2.0 - 0.6*setsVol - 0.3*h2hVol;
+        const shrink = 0.65 + 0.15*(setsVol + 0.5*h2hVol);
+        const clipLo = 0.22 - 0.04*(setsVol + 0.5*h2hVol);
+        const clipHi = 1 - clipLo;
+        const pTemp = 1/(1+Math.exp(-(z/Math.max(1e-6,tau))));
+        let pCal = 0.5 + shrink*(pTemp - 0.5);
+        pCal = Math.max(clipLo, Math.min(clipHi, pCal));
+        const pA01 = pCal; const pB01 = 1 - pA01;
+        return [Math.round(pA01*100), Math.round(pB01*100)];
+      } catch(_) { return [null, null]; }
+    };
+    const recA = (playerA && Array.isArray(out.recentsA10)) ? out.recentsA10 : [];
+    const recB = (playerB && Array.isArray(out.recentsB10)) ? out.recentsB10 : [];
+    const h2hA = Array.isArray(out.h2hOrientedA) ? out.h2hOrientedA : [];
+    const h2hB = Array.isArray(out.h2hOrientedB) ? out.h2hOrientedB : [];
+    const [pA10, pB10] = windowLogistic(recA, recB, h2hA, h2hB, 10);
+    const [pA5,  pB5 ] = windowLogistic(recA, recB, h2hA, h2hB, 5);
+    const [pA3,  pB3 ] = windowLogistic(recA, recB, h2hA, h2hB, 3);
+    out.logistic = { pA10, pB10, pA5, pB5, pA3, pB3 };
   } catch(_) {}
   // Enrich with non-BT probabilities and simple beta forecast
   try { computeNonBTProbabilities(out); } catch(_) {}

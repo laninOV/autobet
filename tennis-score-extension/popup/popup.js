@@ -1170,9 +1170,22 @@ document.addEventListener('DOMContentLoaded', () => {
       if (p5B)  p5B.textContent  = toPctStr(out5.pB);
       if (p3A)  p3A.textContent  = toPctStr(out3.pA);
       if (p3B)  p3B.textContent  = toPctStr(out3.pB);
-      if (p10A && p10B) { resetHL(p10A); resetHL(p10B); if (out10.pA>out10.pB){ applyTier(p10A,'good'); applyTier(p10B,'bad'); } else { applyTier(p10B,'good'); applyTier(p10A,'bad'); } }
-      if (p5A && p5B)   { resetHL(p5A);  resetHL(p5B);  if (out5.pA>out5.pB){   applyTier(p5A,'good');  applyTier(p5B,'bad');  } else { applyTier(p5B,'good');  applyTier(p5A,'bad');  } }
-      if (p3A && p3B)   { resetHL(p3A);  resetHL(p3B);  if (out3.pA>out3.pB){   applyTier(p3A,'good');  applyTier(p3B,'bad');  } else { applyTier(p3B,'good');  applyTier(p3A,'bad');  } }
+      // Highlight green only for the leading side if > 54%
+      if (p10A && p10B) {
+        resetHL(p10A); resetHL(p10B);
+        if (out10.pA >= out10.pB) { if (out10.pA > 0.54) applyTier(p10A,'good'); }
+        else { if (out10.pB > 0.54) applyTier(p10B,'good'); }
+      }
+      if (p5A && p5B) {
+        resetHL(p5A); resetHL(p5B);
+        if (out5.pA >= out5.pB) { if (out5.pA > 0.54) applyTier(p5A,'good'); }
+        else { if (out5.pB > 0.54) applyTier(p5B,'good'); }
+      }
+      if (p3A && p3B) {
+        resetHL(p3A); resetHL(p3B);
+        if (out3.pA >= out3.pB) { if (out3.pA > 0.54) applyTier(p3A,'good'); }
+        else { if (out3.pB > 0.54) applyTier(p3B,'good'); }
+      }
 
       const fmtDelta = (v)=>{ const x = Number(v)||0; return (x>=0?'+':'') + (Math.round(x*100)/100).toFixed(2); };
       const d10 = document.getElementById('modelDeltas10');
@@ -2871,38 +2884,32 @@ document.addEventListener('DOMContentLoaded', () => {
       if (score >= 5 || index >= 0.75) { verdict = '🟢 Надёжно — высокая вероятность победы'; color = '#0a0'; }
       else if (score <= 2 || index < 0.45) { verdict = '🔴 Рисково — перевес слабый, фаворит уязвим'; color = '#a00'; }
 
-      const dsHtml = `
-        <div class="decision-summary" style="background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;">
-          <div style="font-size:14px;">🔎 Совпадения: ${score}/6 • Фаворит: ${favName}</div>
-          <ul style=\"margin:6px 0 8px 16px;padding:0;font-weight:500;\">
-            ${conditions.map(c => `<li>${c}</li>`).join('')}
-            ${misses.length ? `<li>❌ Не выполнено: ${misses.join('; ')}</li>` : ''}
-          </ul>
-          <div style=\"font-weight:600;\">📈 Индекс уверенности: ${indexPct}% <span style=\"opacity:.9;font-weight:600;\">(${idxBand})</span></div>
-          <div style=\"margin-top:4px;\">💬 Вердикт: ${verdict}</div>
-          <div style=\"margin-top:4px;opacity:.95;\">Ключевые сигналы: форма(3) ${(gapForm>0)?'↑':(gapForm<0?'↓':'→')}, без BT(3) ${(gapNB3>0)?'↑':(gapNB3<0?'↓':'→')}, логистическая(3) ${(gapML3>0)?'↑':(gapML3<0?'↓':'→')}</div>
-        </div>
-      `;
+      const dsHtml = '';
 
       // Min 2 sets block
       const opp_d5_10 = (Number.isFinite(opp.p5) && Number.isFinite(opp.p10)) ? (opp.p5 - opp.p10) : NaN;
       const passNoBt3 = gapNB3 >= 15;
       const passForm3 = gapForm >= 15;
-      const passMl3 = gapML3 >= 15;
+      // Абсолютное условие для логистической (3): > 53% за фаворита
+      const passMl3 = favMl3Pct > 53;
       const mlRed = gapML3 < 0;
       const matched = (passNoBt3?1:0) + (passForm3?1:0) + (passMl3?1:0);
+      // Индекс силы и форма: фаворит по окну 10 должен иметь P(3) > 55%
+      const favP3Val = Number(fav?.p3);
+      const passIdxBlock = Number.isFinite(favP3Val) && favP3Val > 55;
       const shockOpp = (Number.isFinite(opp_d5_10) && opp_d5_10 >= 15) || (Number.isFinite(fav.d5_10) && fav.d5_10 <= -15);
       let v2 = 'Осторожно';
       let c2color = '#aa0';
-      if (shockOpp || matched <= 1) { v2 = 'PASS'; c2color = '#a00'; }
+      // Жёсткие условия: логистическая(3) > 53% И в блоке «Индекс силы и форма» у фаворита P(3) > 55%
+      if (!passMl3 || !passIdxBlock || shockOpp || matched <= 1) { v2 = 'PASS'; c2color = '#a00'; }
       else if (matched >= 2 && mlRed) { v2 = 'Осторожно'; c2color = '#aa0'; }
       else if (matched >= 2 && !mlRed) { v2 = 'GO'; c2color = '#0a0'; }
       const sign = (x)=>{ const n=Math.round(Number(x)||0); return (Number.isFinite(n)? ((n>=0?'+':'')+n+'%') : '—'); };
       const fmt10 = (v)=>{ const n=Number(v); return Number.isFinite(n)? (Math.round(n)+'%'):'—'; };
       const min2Html = `
         <div class="take-two-sets" style="background:${c2color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;">
-          <div style=\"font-size:14px;\">🔎 Решение: ${v2}   | Совпадений: ${matched}/3 • Фаворит: ${favName}</div>
-          <div style=\"margin-top:2px;\">Ключи: БезBT(3) ${sign(gapNB3)}, Форма(3) ${sign(gapForm)}, Логист.(3) ${sign(gapML3)}${mlRed?' (красная)':''}</div>
+          <div style=\"font-size:14px;\">🔎 Решение: ${v2} | Совпадений: ${matched}/3 • Фаворит: ${favName}</div>
+          <div style=\"margin-top:2px;\">Ключи: БезBT(3) ${sign(gapNB3)}, Форма(3) ${sign(gapForm)}, Логист.(3) ${favMl3Pct}% (${sign(gapML3)})${mlRed?' (красная)':''}</div>
           <div style=\"margin-top:2px;opacity:.95;font-weight:500;\">Фон (10): ${fmt10(fav.p10)} vs ${fmt10(opp.p10)}${shockOpp?` • У оппа форм-шок Δ(5−10) ${sign(opp_d5_10)}`:''}</div>
         </div>
       `;
@@ -2978,6 +2985,7 @@ document.addEventListener('DOMContentLoaded', () => {
           try { if (typeof window.fillTB35 === 'function') window.fillTB35(d); } catch(e) { console.warn('fillTB35 error', e); }
           try { applyHelpTitles(); } catch(e) {}
           if(results) results.classList.remove('hidden');
+          try { fillDecisionQuick(d); } catch(e) { console.warn('fillDecisionQuick error', e); }
         } catch (e) {
           setError('Ошибка: ' + e.message);
         }
@@ -2986,6 +2994,60 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // end: normal UI flow restored
+
+  // Lightweight decision block (3 keys) for summary card
+  function fillDecisionQuick(d){
+    const cont = document.getElementById('decisionSummaryContainer');
+    if (!cont) return;
+    try {
+      const nameA = d?.playerA?.name || 'Игрок 1';
+      const nameB = d?.playerB?.name || 'Игрок 2';
+      const a10 = Number(d?.playerA?.nonBTProbability10 ?? d?.playerA?.nonBTProbability);
+      const b10 = Number(d?.playerB?.nonBTProbability10 ?? d?.playerB?.nonBTProbability);
+      const a5  = Number(d?.playerA?.nonBTProbability5);
+      const b5  = Number(d?.playerB?.nonBTProbability5);
+      const a3  = Number(d?.playerA?.nonBTProbability3);
+      const b3  = Number(d?.playerB?.nonBTProbability3);
+      const favIsA = (Number.isFinite(a10) && Number.isFinite(b10)) ? (a10 >= b10) : true;
+      const favName = favIsA ? nameA : nameB;
+      const nb3Fav = favIsA ? a3 : b3;
+      const nb3Opp = favIsA ? b3 : a3;
+      const gapNB3 = (Number.isFinite(nb3Fav) && Number.isFinite(nb3Opp)) ? (nb3Fav - nb3Opp) : NaN;
+      const gapForm = gapNB3; // приближение формы(3) через non-BT(3)
+
+      // Logistic(3) from content
+      const pA3 = Number(d?.logistic?.pA3);
+      const pB3 = Number(d?.logistic?.pB3);
+      const favMl3Pct = Math.max(Number.isFinite(pA3)?pA3:NaN, Number.isFinite(pB3)?pB3:NaN);
+      const ml3Diff = (Number.isFinite(pA3) && Number.isFinite(pB3)) ? ( (favIsA? (pA3-pB3) : (pB3-pA3)) ) : NaN;
+
+      const passNoBt3 = Number.isFinite(gapNB3) && gapNB3 >= 15;
+      const passForm3 = Number.isFinite(gapForm) && gapForm >= 15;
+      const passMl3   = Number.isFinite(favMl3Pct) && favMl3Pct > 53; // >53% обязательное
+
+      // Индекс силы/форма (10): P(3) у фаворита >55%
+      const favP3 = favIsA ? a3 : b3;
+      const passIdx = Number.isFinite(favP3) && favP3 > 55;
+
+      const matched = (passNoBt3?1:0)+(passForm3?1:0)+(passMl3?1:0);
+      let v2 = 'Осторожно';
+      let color = '#aa0';
+      if (!passMl3 || !passIdx || matched <= 1) { v2='PASS'; color='#a00'; }
+      else if (matched >= 2) { v2='GO'; color='#0a0'; }
+
+      const sign = (x)=>{ const n=Math.round(Number(x)||0); return (Number.isFinite(n)? ((n>=0?'+':'')+n+'%') : '—'); };
+      const fmtPct = (x)=> Number.isFinite(x)? (Math.round(x)+'%') : '—';
+      const fmt10 = (x)=> Number.isFinite(x)? (Math.round(x)+'%') : '—';
+
+      const html = `
+        <div class="take-two-sets" style="background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;">
+          <div style="font-size:14px;">🔎 Решение: ${v2} | Совпадений: ${matched}/3 • Фаворит: ${favName}</div>
+          <div style="margin-top:2px;">Ключи: БезBT(3) ${sign(gapNB3)}, Форма(3) ${sign(gapForm)}, Логист.(3) ${fmtPct(favMl3Pct)} (${sign(ml3Diff)})</div>
+          <div style="margin-top:2px;opacity:.95;font-weight:500;">Фон (10): ${fmt10(a10)} vs ${fmt10(b10)}</div>
+        </div>`;
+      cont.innerHTML = html;
+    } catch(e){ cont.textContent = '—'; }
+  }
 
   // ---- Индекс силы матча и форма ----
   function fillStrengthIndex(d){
@@ -3019,17 +3081,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const p5BEl  = document.getElementById('siProb5B');  if (p5BEl)  p5BEl.textContent  = toPct(b5);
         const p3AEl  = document.getElementById('siProb3A');  if (p3AEl)  p3AEl.textContent  = toPct(a3);
         const p3BEl  = document.getElementById('siProb3B');  if (p3BEl)  p3BEl.textContent  = toPct(b3);
-        // Per-window tiered highlighting: green (>=65%), yellow (>=55%) for the leading side
+        // Per-window highlighting: green only if leader > 55%
         const applyWindowHL = (aVal, bVal, aEl, bEl) => {
           if (!aEl || !bEl) return;
           resetHL(aEl); resetHL(bEl);
           const aOk = Number.isFinite(aVal); const bOk = Number.isFinite(bVal);
           if (!aOk || !bOk) return;
-          const aPct = aVal/100, bPct = bVal/100;
           const aIsFav = aVal >= bVal;
-          const lead = aIsFav ? aPct : bPct;
-          // Only green highlight in this block
-          if (lead >= 0.65) applyTier(aIsFav ? aEl : bEl, 'good');
+          const leadPct = (aIsFav ? aVal : bVal) / 100;
+          if (leadPct > 0.55) applyTier(aIsFav ? aEl : bEl, 'good');
         };
         applyWindowHL(a10, b10, p10AEl, p10BEl);
         applyWindowHL(a5,  b5,  p5AEl,  p5BEl);

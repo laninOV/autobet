@@ -1,0 +1,15 @@
+2025/10/14-13:24:37.047 1d1b1 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2025/10/14-13:24:37.048 1d1b1 Recovering log #69
+2025/10/14-13:24:37.049 1d1b1 Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/000069.log 
+2025/10/14-13:25:37.053 1d1b4 Level-0 table #72: started
+2025/10/14-13:25:37.058 1d1b4 Level-0 table #72: 16879 bytes OK
+2025/10/14-13:25:37.061 1d1b4 Delete type=0 #69
+2025/10/14-13:25:37.062 1d1b1 Compacting 4@0 + 1@1 files
+2025/10/14-13:25:37.064 1d1b1 Generated table #73@0: 719 keys, 19655 bytes
+2025/10/14-13:25:37.065 1d1b1 Compacted 4@0 + 1@1 files => 19655 bytes
+2025/10/14-13:25:37.066 1d1b1 compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/10/14-13:25:37.066 1d1b1 Delete type=2 #62
+2025/10/14-13:25:37.067 1d1b1 Delete type=2 #60
+2025/10/14-13:25:37.067 1d1b1 Delete type=2 #66
+2025/10/14-13:25:37.067 1d1b1 Delete type=2 #72
+2025/10/14-13:25:37.067 1d1b1 Delete type=2 #68
