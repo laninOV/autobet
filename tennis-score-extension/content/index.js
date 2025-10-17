@@ -145,14 +145,11 @@ function renderMinTwoSets(match) {
   const ml3Diff   = Number((ml?.pFav3 ?? NaN) - (ml?.pOpp3 ?? NaN));
   const mlFav3    = Number(ml?.pFav3 ?? NaN);
 
-  // Новая логика (синхронизировано с попапом):
-  // 1) Без BT (3): перевес по окну 3 не меньше 15%
   const passNoBt3 = ok(noBt3Diff) && noBt3Diff >= 15;
-  // 2) Форма (3): перевес по форме не меньше 15%
   const passForm3 = ok(form3Diff) && form3Diff >= 15;
-  // 3) Прогноз (логистическая модель, 3): вероятность фаворита > 53%
-  const passMl3   = ok(mlFav3) && mlFav3 > 53;
-  const mlRed     = ok(ml3Diff) ? (ml3Diff < 0) : false; // красная логистика
+  // Логистическая (3): считаем выполненной, если вероятность фаворита по логистике ≥ 55%
+  const passMl3   = ok(mlFav3) && mlFav3 >= 55;
+  const mlRed     = ok(ml3Diff)   ? (ml3Diff < 0) : false; // красная логистика
 
   // Background (10-game) context
   const p10Fav = Number(fav?.p10 ?? NaN);
@@ -163,31 +160,110 @@ function renderMinTwoSets(match) {
   const d5_10_fav = Number(fav?.d5_10 ?? NaN);
   const shockOpp = (ok(d5_10_opp) && d5_10_opp >= 15) || (ok(d5_10_fav) && d5_10_fav <= -15);
 
-  // Не даём двойной счёт, только если форма(3) — явный аппрокс через non-BT(3)
-  const formApprox = !!(match?.form && match.form._approx);
-  const matched = (passNoBt3 ? 1 : 0) + ((passForm3 && !formApprox) ? 1 : 0) + (passMl3 ? 1 : 0);
+  const matched = [passNoBt3, passForm3, passMl3].filter(Boolean).length;
 
   let verdict = 'Осторожно';
   let color = '#aa0';
-  // Обязательные условия: Логистика(3) > 53% и P(3) > 55% в блоке индекса
-  const mustMlFav = ok(mlFav3) && mlFav3 > 53;
-  const favP3Val = Number(fav?.p3);
-  const passIdxBlock = Number.isFinite(favP3Val) && favP3Val > 55;
-  if (!mustMlFav || !passIdxBlock || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
+  // Обязательное условие для решения в пользу фаворита — Вероятность(3) ≥ 55%
+  const mustMlFav = ok(mlFav3) && mlFav3 >= 55;
+  if (!mustMlFav || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
   else if (matched >= 2 && mlRed) { verdict = 'Осторожно'; color = '#aa0'; }
   else if (matched >= 2 && !mlRed) { verdict = 'GO'; color = '#0a0'; }
 
   const mlBadge = mlRed ? ' (красная)' : '';
   const favName = match?.favName || 'Фаворит';
-  const header = `🔎 Решение: ${verdict} | Совпадений: ${matched}/3 • Фаворит: ${favName}`;
-  const keys = `Ключи: БезBT(3) ${signPct(noBt3Diff)}, Форма(3) ${signPct(form3Diff)}, Логист.(3) ${fmtPct(mlFav3)}${ok(ml3Diff)?` (${signPct(ml3Diff)})`:''}${mlBadge}`;
-  const bg = `Фон (10): ${fmtPct(p10Fav)} vs ${fmtPct(p10Opp)}` + (shockOpp ? ` • У оппа форм-шок Δ(5−10) ${signPct(d5_10_opp)}` : '');
+  const header = `🔎 Решение: ${verdict} | Совпадений: ${matched}/3`;
+
+  // Values for compact extract block
+  const favMl3Int = ok(mlFav3) ? Math.round(mlFav3) : null;
+  const favMl3Str = ok(mlFav3) ? (Math.round(mlFav3 * 10) / 10).toFixed(1) + '%' : '—';
+  const favIdx3Int = ok(fav?.p3) ? Math.round(Number(fav.p3)) : null;
+  const dataFav = String(favName || '').replace(/"/g, '\"');
+  const dataLog3 = favMl3Int != null ? ` data-log3="${favMl3Int}"` : '';
+  const dataIdx3 = favIdx3Int != null ? ` data-idx3="${favIdx3Int}"` : '';
 
   return `
     <div class="take-two-sets" style="background:${color};color:#fff;display:block;width:100%;box-sizing:border-box;padding:12px 16px;border-radius:12px;font:600 14px/1.4 system-ui;margin:10px 0;">
       <div style="font-size:15px;">${header}</div>
-      <div style="margin-top:4px;">${keys}</div>
-      <div style="margin-top:4px;opacity:.95;font-weight:600;">${bg}</div>
+      <div class="min2-extract" data-fav="${dataFav}"${dataLog3}${dataIdx3} style="margin-top:8px;border-top:1px solid rgba(255,255,255,.35);padding-top:6px;">
+        <div>Фаворит ${favName}</div>
+        <div class="min2-log3">${favMl3Str}</div>
+        <div>${favIdx3Int != null ? favIdx3Int + '%' : '—'}</div>
+      </div>
+    </div>
+  `;
+}
+
+// --- Favorite vs Outsider compact compare block ---
+function renderFavOppCompare(payload) {
+  const safePct = (v, d = 1) => (typeof v === 'number' && isFinite(v) ? (Math.round(v * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d) + '%' : '—');
+  const safeIntPct = (v) => (typeof v === 'number' && isFinite(v) ? Math.round(v) + '%' : '—');
+  const nbLine = (x, y) => [
+    (typeof x === 'number' && isFinite(x)) ? `без H2H ${Math.round(x)}%` : null,
+    (typeof y === 'number' && isFinite(y)) ? `с H2H ${Math.round(y)}%` : null
+  ].filter(Boolean).join(' • ');
+  const formatDots = (tokensStr) => {
+    if (!tokensStr) return '';
+    const tokens = String(tokensStr).trim().split(/\s+/).filter(Boolean);
+    const mk = (cls, color) => `<span class="dot ${cls}" title="${cls==='dot-win'?'win':'loss'}" style="width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px rgba(0,0,0,0.12) inset;margin-right:3px;vertical-align:middle;background:${color};"></span>`;
+    return tokens.map(t => (t === '🟢' ? mk('dot-win', '#22c55e') : mk('dot-loss', '#ef4444'))).join('');
+  };
+
+  const favName = payload?.favName || '';
+  const oppName = payload?.oppName || '';
+  // Use emojis in headers: 🏆 favorite, 🚫 outsider
+  const favHdr = `🏆 ${favName || 'Фаворит'}`;
+  const oppHdr = `🚫 ${oppName || 'Аутсайдер'}`;
+
+  const favNb = nbLine(payload?.nbFavNo, payload?.nbFavWith);
+  const oppNb = nbLine(payload?.nbOppNo, payload?.nbOppWith);
+  // Show ML(3) as whole percentages (no decimals)
+  const favMl = safeIntPct(payload?.mlFav3);
+  const oppMl = safeIntPct(payload?.mlOpp3);
+  const favIdx = safeIntPct(payload?.idxFav3);
+  const oppIdx = safeIntPct(payload?.idxOpp3);
+  const formatDelta = (d) => {
+    if (typeof d !== 'number' || !isFinite(d)) return '';
+    const sign = d > 0 ? '+' : (d < 0 ? '−' : '±');
+    const arrow = d > 0 ? '↑' : (d < 0 ? '↓' : '→');
+    const color = d > 0 ? '#22c55e' : (d < 0 ? '#ef4444' : '#64748b');
+    const val = Math.abs(Math.round(d));
+    return `<span class="nb-win" style="color:${color}">${sign}${val}% ${arrow}</span>`;
+  };
+  const d35Fav = (typeof payload?.d3_5Fav === 'number') ? payload.d3_5Fav : null;
+  const d35Opp = (typeof payload?.d3_5Opp === 'number') ? payload.d3_5Opp : null;
+  const last10Avail = !!payload?.last10Avail;
+  const last10Tokens = payload?.last10Tokens;
+  const last10Html = last10Avail
+    ? (last10Tokens ? `${formatDots(last10Tokens)}` : '')
+    : '<span style="color:#64748b;">нет H2H</span>';
+
+  return `
+    <div class="min2-compare" style="margin-top:8px;background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
+      <div class="cmp-head" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #eee;background:#f7f7f7;">
+        <div style="padding:8px 10px;font-weight:600;">${favHdr}</div>
+        <div style="padding:8px 10px;font-weight:600;border-left:1px solid #eee;">${oppHdr}</div>
+      </div>
+      <div class="cmp-row nb3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
+        <div class="fav nb3" style="padding:8px 10px;">${favNb}</div>
+        <div class="opp nb3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppNb}</div>
+      </div>
+      <div class="cmp-row ml3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
+        <div class="fav ml3" style="padding:8px 10px;">${favMl}</div>
+        <div class="opp ml3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppMl}</div>
+      </div>
+      <div class="cmp-row idx3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+        <div class="fav idx3" style="padding:8px 10px;">${favIdx}</div>
+        <div class="opp idx3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppIdx}</div>
+      </div>
+      <div class="cmp-row d35" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
+        <div class="fav d35" style="padding:8px 10px;">${formatDelta(d35Fav)}</div>
+        <div class="opp d35" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${formatDelta(d35Opp)}</div>
+      </div>
+      ${`
+      <div class="cmp-row last10" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
+        <div class="fav last10" style="padding:8px 10px; grid-column: 1 / span 2;">${last10Html}</div>
+      </div>`}
     </div>
   `;
 }
@@ -557,11 +633,14 @@ function renderMinTwoSets(match) {
       // Expose manual insertion of summary blocks (disabled by default)
       window.__insertAutoBlocks = insertAutoBlocks;
       window.__insertMinTwoBeforeName = insertMinTwoBeforeName;
+      window.__updateMin2Blocks = updateAllMin2Extracts;
     } catch {}
     // Auto-insert compact decision block on match pages, centered at top of container
     try { autoInsertDecisionOnMatchPage(); } catch {}
     // Keep targeted insertion for specific stats page demo (no-op if not applicable)
     try { autoInsertForTSProStats(); } catch {}
+    // After insertion, update any existing min2 blocks on the page (ids may vary)
+    try { updateAllMin2Extracts(); } catch {}
   };
 
   // Observe significant DOM changes (site can be dynamic)
@@ -580,12 +659,14 @@ function renderMinTwoSets(match) {
     );
     if (addedPlayerName) {
       try { autoInsertForTSProStats(); } catch {}
+      try { updateAllMin2Extracts(); } catch {}
     }
     const containerAppeared = mut.some((m) =>
       Array.from(m.addedNodes || []).some((n) => n.nodeType === 1 && (n.matches?.('.container-xl.mb-5') || n.querySelector?.('.container-xl.mb-5')))
     );
     if (containerAppeared) {
       try { autoInsertDecisionOnMatchPage(); } catch {}
+      try { updateAllMin2Extracts(); } catch {}
     }
   });
 
@@ -595,6 +676,133 @@ function renderMinTwoSets(match) {
     install();
   }
   mo.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Update existing on-page take-two-sets/min2-extract blocks to reflect recalculated values
+  function updateAllMin2Extracts() {
+    try {
+      let data = null;
+      try { data = buildAnalyzeData({}); } catch (_) { return; }
+      if (!data || !data.playerA || !data.playerB) return;
+      const a10 = Number(data.playerA.nonBTProbability10 ?? data.playerA.nonBTProbability);
+      const b10 = Number(data.playerB.nonBTProbability10 ?? data.playerB.nonBTProbability);
+      if (!Number.isFinite(a10) || !Number.isFinite(b10)) return;
+      const a3 = Number(data.playerA.nonBTProbability3);
+      const b3 = Number(data.playerB.nonBTProbability3);
+      const favIsA = a10 >= b10;
+      const favName = favIsA ? (data.playerA.name || 'Игрок 1') : (data.playerB.name || 'Игрок 2');
+
+      // Compute logistic(3) with the same model as popup
+      const p3 = computeModelP3(data);
+      const favMl3 = favIsA ? (p3.pA*100) : (p3.pB*100);
+      const favMl3Str = (typeof favMl3 === 'number' && isFinite(favMl3)) ? (Math.round(favMl3*10)/10).toFixed(1) + '%' : '—';
+      const favMl3Int = (typeof favMl3 === 'number' && isFinite(favMl3)) ? Math.round(favMl3) : null;
+      const favIdx3 = favIsA ? a3 : b3;
+      const favIdx3Int = Number.isFinite(favIdx3) ? Math.round(favIdx3) : null;
+
+      // Recompute verdict/matched for header
+      const gapNB3 = (favIsA ? a3 - b3 : b3 - a3);
+      const passNoBt3 = Number.isFinite(gapNB3) && gapNB3 >= 15;
+      const passForm3 = passNoBt3; // proxy approximation
+      const passMl3 = (typeof favMl3 === 'number' && isFinite(favMl3)) ? (favMl3 > 53) : false;
+      const matched = (passNoBt3?1:0)+(passForm3?1:0)+(passMl3?1:0);
+      let verdict = 'Осторожно'; let color = '#aa0';
+      const favP3 = favIsA ? a3 : b3; const passIdx = Number.isFinite(favP3) && favP3 > 55;
+      if (!passMl3 || !passIdx || matched <= 1) { verdict='PASS'; color='#a00'; }
+      else if (matched >= 2) { verdict='GO'; color='#0a0'; }
+
+      // Compute NB(3) without/with H2H for favorite
+      const a3h = Number(data?.playerA?.nonBTProbability3_h2h);
+      const b3h = Number(data?.playerB?.nonBTProbability3_h2h);
+      const nbNo = favIsA ? a3 : b3;
+      const nbWith = favIsA ? a3h : b3h;
+      const nbLine = [
+        Number.isFinite(nbNo) ? `без H2H ${Math.round(nbNo)}%` : null,
+        Number.isFinite(nbWith) ? `с H2H ${Math.round(nbWith)}%` : null
+      ].filter(Boolean).join(' • ');
+
+      // Update all blocks
+      document.querySelectorAll('.take-two-sets .min2-extract').forEach((el) => {
+        try {
+          const holder = el.closest('.take-two-sets');
+          if (holder) holder.style.background = color;
+          // Header: first child div of holder
+          const header = holder ? holder.querySelector(':scope > div') : null;
+          if (header) header.textContent = `🔎 Решение: ${verdict} | Совпадений: ${matched}/3 • Фаворит: ${favName}`;
+          // Data attributes
+          el.setAttribute('data-fav', favName);
+          if (favMl3Int != null) el.setAttribute('data-log3', String(favMl3Int)); else el.removeAttribute('data-log3');
+          if (favIdx3Int != null) el.setAttribute('data-idx3', String(favIdx3Int)); else el.removeAttribute('data-idx3');
+          if (Number.isFinite(nbNo)) el.setAttribute('data-nb3-no', String(Math.round(nbNo))); else el.removeAttribute('data-nb3-no');
+          if (Number.isFinite(nbWith)) el.setAttribute('data-nb3-with', String(Math.round(nbWith))); else el.removeAttribute('data-nb3-with');
+          // Text nodes
+          const nameDiv = el.children[0]; if (nameDiv) nameDiv.textContent = `Фаворит ${favName}`;
+          // Ensure NB3 line exists right after name
+          let nbDiv = el.querySelector('.min2-nb3');
+          if (!nbDiv) {
+            nbDiv = document.createElement('div');
+            nbDiv.className = 'min2-nb3';
+            if (el.children.length >= 2) el.insertBefore(nbDiv, el.children[1]); else el.appendChild(nbDiv);
+          }
+          nbDiv.textContent = nbLine || '';
+          const logDiv = el.querySelector('.min2-log3') || el.children[2]; if (logDiv) logDiv.textContent = favMl3Str;
+          const idxDiv = el.children[3] || el.children[2]; if (idxDiv) idxDiv.textContent = (favIdx3Int != null ? (favIdx3Int+'%') : '—');
+        } catch(_){}
+      });
+    } catch(_) { /* noop */ }
+  }
+
+  // Compute logistic(3) like popup's model forecast table to keep values consistent
+  function computeModelP3(d) {
+    try {
+      const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
+      const recA10 = Array.isArray(d?.recentsA10)? d.recentsA10 : [];
+      const recB10 = Array.isArray(d?.recentsB10)? d.recentsB10 : [];
+      const setsAvgDiffPerSet = (rec)=>{ let diff=0, sets=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ const aa=+a||0, bb=+b||0; diff += (aa-bb); sets++; }); }); return sets? (diff/sets) : 0; };
+      const perMatchSetDiff = (rec)=> (rec||[]).map(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; let diff=0; s.forEach(([a,b])=>{ diff += ((+a||0) - (+b||0)); }); return s.length? (diff/s.length) : 0; });
+      const emaArr = (arr,a)=>{ if(!arr.length) return 0; let s=arr[0]; for(let i=1;i<arr.length;i++) s=a*arr[i]+(1-a)*s; return s; };
+      const slope3 = (arr)=>{ const L=arr.slice(0,3); const n=L.length; if(n<=1) return 0; let sx=0,sy=0,sxy=0,sxx=0; for(let i=0;i<n;i++){ const x=i+1,y=L[i]; sx+=x; sy+=y; sxy+=x*y; sxx+=x*x; } const den=n*sxx-sx*sx; return den? (n*sxy - sx*sy)/den : 0; };
+      const pointsSummaryDiff = (rec)=>{ let sum=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ sum += ((+a||0) - (+b||0)); }); }); return sum; };
+      const SstarA = Number(d?.playerA?.S_star); const SstarB = Number(d?.playerB?.S_star);
+      const EXT_A = Number(d?.playerA?.patterns?  ( (1-(d.playerA.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerA.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerA.patterns.tiebreak_losses?.rate||0))*20 + (d.playerA.patterns.decisive_fifth_wins?.rate||d.playerA.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+      const EXT_B = Number(d?.playerB?.patterns?  ( (1-(d.playerB.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerB.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerB.patterns.tiebreak_losses?.rate||0))*20 + (d.playerB.patterns.decisive_fifth_wins?.rate||d.playerB.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+      const STAB_A = Number(d?.playerA?.stability||0)*100; const STAB_B = Number(d?.playerB?.stability||0)*100;
+      const A = recA10.slice(0,3), B = recB10.slice(0,3);
+      const A_per = perMatchSetDiff(A), B_per = perMatchSetDiff(B);
+      const F_short_A = emaArr(A_per.slice(0,5), 0.7);
+      const F_short_B = emaArr(B_per.slice(0,5), 0.7);
+      const Trend_A = slope3(A_per); const Trend_B = slope3(B_per);
+      const NF = 6;
+      let dF = ((F_short_A - F_short_B) + 0.5*(Trend_A - Trend_B)) / NF; dF = clamp(dF, -1, 1);
+      const NS = 0.5; let dS = (isFinite(SstarA)&&isFinite(SstarB))? ((SstarA - SstarB)/NS) : 0; dS = clamp(dS, -1, 1);
+      const A10 = setsAvgDiffPerSet(recA10), B10 = setsAvgDiffPerSet(recB10);
+      const A5  = setsAvgDiffPerSet(recA10.slice(0,5)),  B5  = setsAvgDiffPerSet(recB10.slice(0,5));
+      let baseD = 0.6*((A5-B5)) + 0.4*((A10-B10));
+      const favA3  = (Number(d?.playerA?.nonBTProbability3)||0) >= (Number(d?.playerB?.nonBTProbability3)||0);
+      const PDk_A  = pointsSummaryDiff(A);
+      let blow = 0; if (favA3){ if ((PDk_A||0)>=25) blow += 0.12; }
+      const hFav = favA3? (d?.h2hOrientedA||[]) : (d?.h2hOrientedB||[]);
+      const lostK = (k)=>{ let c=0; for(let i=0;i<Math.min(k,hFav.length);i++){ const fo=hFav[i]?.finalScoreOwnOpponent; const win = fo && Number(fo.own)>Number(fo.opponent); if (win===false) c++; } return c===k; };
+      if (lostK(2)) blow += 0.20; if (lostK(3)) blow += 0.35;
+      let dD = baseD - blow; const ND = 4; dD = clamp(dD/ND, -1, 1);
+      const pairRates = (()=>{ let tb=0,sets=0,long=0,m=0; [A,B].forEach(arr=>{ arr.forEach(mm=>{ const s=Array.isArray(mm.setsOwnOpponent)? mm.setsOwnOpponent:[]; if(s.length){ m++; if(s.length>=4) long++; } s.forEach(([a,b])=>{ const aa=+a||0,bb=+b||0; if(aa>=10&&bb>=10) tb++; sets++; }); }); }); return { tb: (sets? tb/sets:0), long:(m? long/m:0) }; })();
+      let ExtGap = (EXT_A - EXT_B)/100, StabTerm = (STAB_A - STAB_B)/100;
+      let dT_raw = 0.6*ExtGap + 0.2*StabTerm + 0.2*(pairRates.tb - 0.5) + 0.2*(pairRates.long - 0.5);
+      if (EXT_B - EXT_A >= 12 && favA3) dT_raw -= 0.25;
+      const NT = 0.7; let dT = clamp(dT_raw/NT, -1, 1);
+      const bF=0.35, bS=0.30, bD=0.25, bT=0.15, b0=0.0;
+      const z = b0 + bF*dF + bS*dS + bD*dD + bT*dT;
+      let pFav = 1/(1+Math.exp(-z));
+      const Pnb = ((Number(d?.playerA?.nonBTProbability3)||0)/100);
+      if (Pnb>=0.47 && Pnb<=0.53 && (EXT_A>=80 && EXT_B>=80)) pFav = 1/(1+Math.exp(-(z-0.35)));
+      if (favA3 && (PDk_A||0) >= 25) pFav = Math.min(pFav, 0.77);
+      if (lostK(2)) pFav = 1/(1+Math.exp(-(z-0.30)));
+      if (lostK(3)) pFav = 1/(1+Math.exp(-(z-0.50)));
+      const pA = favA3? pFav : (1-pFav);
+      return { pA, pB: 1-pA };
+    } catch(_) {
+      return { pA: NaN, pB: NaN };
+    }
+  }
 
   // Try to auto-insert summary blocks into the page
   function insertAutoBlocks() {
@@ -627,26 +835,7 @@ function renderMinTwoSets(match) {
     // Orientation by 10-game non-BT (for Decision Summary)
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    // Try to compute independent Form(3) from last 3 matches' sets share; fallback to non-BT(3)
-    const computeFormP3 = (arr) => {
-      try{
-        const L = Array.isArray(arr)? arr.slice(0,3) : [];
-        let own=0, opp=0;
-        for (const m of L){
-          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
-          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
-        }
-        const tot = own + opp;
-        if (tot <= 0) return null;
-        return Math.round(100 * (own / tot));
-      }catch(_){ return null; }
-    };
-    let favForm3 = computeFormP3(data?.recentsA10);
-    let oppForm3 = computeFormP3(data?.recentsB10);
-    if (!favIsA){ const t1=favForm3; favForm3 = oppForm3; oppForm3 = t1; }
-    const form10 = (Number.isFinite(favForm3) && Number.isFinite(oppForm3))
-      ? { p3Fav: favForm3, p3Opp: oppForm3, _approx: false }
-      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
     // Align logistic probabilities with the selected favorite.
     // Prefer calibrated forecast (if available), fallback to predWinProbA/B.
     const pA_fore = (typeof data?.forecast?.pA === 'number') ? Math.round(data.forecast.pA * 100) : undefined;
@@ -749,6 +938,53 @@ function renderMinTwoSets(match) {
     const match10 = { fav: fav10, opp: opp10, form: form10, ml: ml10, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
 
     const htmlTop = renderMinTwoSets(matchTop);
+    // Favorite series for context (prefer H2H up to 10; fallback to recents)
+    const favSeries_t = ((favIsA ? h2hA : h2hB) || []).slice(0,10);
+    const baseTokens_t = (favSeries_t.length ? favSeries_t : (favIsA ? recA : recB).slice(0,10));
+    const tokens_t = baseTokens_t.map(m => { const own=Number(m?.finalScoreOwnOpponent?.own)||0; const opp=Number(m?.finalScoreOwnOpponent?.opponent)||0; return own>opp?'🟢':'🔴'; });
+    const wins_t = tokens_t.filter(t => t==='🟢').length; const losses_t = tokens_t.length - wins_t;
+    // H2H visualization string relative to playerA; invert if favorite is B
+    const baseVis_ins = (data?.h2h && typeof data.h2h.visualization==='string') ? data.h2h.visualization : '';
+    const tokens_ins = (favIsA ? baseVis_ins : baseVis_ins.replace(/🟢|🔴/g, m => (m==='🟢'?'🔴':'🟢'))).trim();
+    const cmpPayload_ins = {
+      favName: fav10.name,
+      oppName: opp10.name,
+      nbFavNo: nbNo_ins,
+      nbFavWith: nbWith_ins,
+      nbOppNo: favIsA ? b3 : a3,
+      nbOppWith: favIsA ? b3h_ins : a3h_ins,
+      mlFav3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pA3_win : pB3_win) : undefined,
+      mlOpp3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pB3_win : pA3_win) : undefined,
+      idxFav3: fav10.p3,
+      idxOpp3: opp10.p3,
+      d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
+      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
+      last10Avail: Number(data?.h2h?.total) > 0,
+      last10Tokens: tokens_ins || null
+    };
+    const htmlCmp_ins = renderFavOppCompare(cmpPayload_ins);
+    // Build compare block (fav vs outsider) right under the decision block
+    const a3h_dec = Number(data?.playerA?.nonBTProbability3_h2h);
+    const b3h_dec = Number(data?.playerB?.nonBTProbability3_h2h);
+    const baseVis_dec = (data?.h2h && typeof data.h2h.visualization==='string') ? data.h2h.visualization : '';
+    const tokens_dec = (favIsA ? baseVis_dec : baseVis_dec.replace(/🟢|🔴/g, m => (m==='🟢'?'🔴':'🟢'))).trim();
+    const cmpPayload_dec = {
+      favName: fav10.name,
+      oppName: opp10.name,
+      nbFavNo: favIsA ? a3 : b3,
+      nbFavWith: favIsA ? a3h_dec : b3h_dec,
+      nbOppNo: favIsA ? b3 : a3,
+      nbOppWith: favIsA ? b3h_dec : a3h_dec,
+      mlFav3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pA3_win : pB3_win) : undefined,
+      mlOpp3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pB3_win : pA3_win) : undefined,
+      idxFav3: fav10.p3,
+      idxOpp3: opp10.p3,
+      d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
+      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
+      last10Avail: Number(data?.h2h?.total) > 0,
+      last10Tokens: tokens_dec || null
+    };
+    const htmlCmp = renderFavOppCompare(cmpPayload_dec);
 
     const containerId = 'tsx-auto-summaries';
     let holder = document.getElementById(containerId);
@@ -763,7 +999,51 @@ function renderMinTwoSets(match) {
         document.body.insertBefore(holder, document.body.firstChild);
       }
     }
-    holder.innerHTML = htmlTop;
+    holder.innerHTML = htmlTop + htmlCmp;
+    // After initial render, try to update H2H dots strictly from H2H once data arrives
+    try {
+      const makeDots = (tokensStr) => {
+        if (!tokensStr) return '';
+        const tokens = String(tokensStr).trim().split(/\s+/).filter(Boolean);
+        const mk = (cls, color) => `<span class=\"dot ${cls}\" title=\"${cls==='dot-win'?'win':'loss'}\" style=\"width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px rgba(0,0,0,0.12) inset;margin-right:3px;vertical-align:middle;background:${color};\"></span>`;
+        return tokens.map(t => (t === '🟢' ? mk('dot-win', '#22c55e') : mk('dot-loss', '#ef4444'))).join('');
+      };
+      let attempts = 0;
+      const id = setInterval(() => {
+        attempts++;
+        try {
+          const d = buildAnalyzeData({});
+          let baseVis = (d?.h2h && typeof d.h2h.visualization === 'string') ? d.h2h.visualization : '';
+          if (!baseVis) {
+            try {
+              const inline = document.getElementById('h2hVizInline');
+              if (inline) {
+                // Build tokens from existing dot nodes
+                const spans = inline.querySelectorAll('.dot');
+                const tokens = [];
+                spans.forEach(el => { tokens.push(el.classList.contains('dot-win') ? '🟢' : '🔴'); });
+                baseVis = tokens.join(' ');
+              }
+            } catch(_) {}
+          }
+          const visStr = favIsA ? baseVis : baseVis.replace(/🟢|🔴/g, m => (m === '🟢' ? '🔴' : '🟢'));
+          const cell = holder.querySelector('.cmp-row.last10 .fav.last10');
+          if (cell) {
+            if (visStr && visStr.trim()) {
+              cell.innerHTML = makeDots(visStr);
+              clearInterval(id);
+            } else if (attempts >= 10) {
+              cell.innerHTML = '<span style="color:#64748b;">нет H2H</span>';
+              clearInterval(id);
+            }
+          } else {
+            clearInterval(id);
+          }
+        } catch(_) {
+          if (attempts >= 10) clearInterval(id);
+        }
+      }, 500);
+    } catch(_) {}
   }
 
   // Auto-insert compact decision block at the top of the main match container, centered
@@ -799,34 +1079,38 @@ function renderMinTwoSets(match) {
     const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    // Independent Form(3) if available; else fallback
-    const computeFormP3b = (arr) => {
-      try{
-        const L = Array.isArray(arr)? arr.slice(0,3) : [];
-        let own=0, opp=0;
-        for (const m of L){
-          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
-          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
-        }
-        const tot = own + opp;
-        if (tot <= 0) return null;
-        return Math.round(100 * (own / tot));
-      }catch(_){ return null; }
-    };
-    let favForm3b = computeFormP3b(data?.recentsA10);
-    let oppForm3b = computeFormP3b(data?.recentsB10);
-    if (!favIsA){ const t1=favForm3b; favForm3b = oppForm3b; oppForm3b = t1; }
-    const form10 = (Number.isFinite(favForm3b) && Number.isFinite(oppForm3b))
-      ? { p3Fav: favForm3b, p3Opp: oppForm3b, _approx: false }
-      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
-    // Logistic probabilities for the 3-game window
-    let pA3 = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
-    let pB3 = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
-    if (!Number.isFinite(pA3) || !Number.isFinite(pB3)) { pA3 = undefined; pB3 = undefined; }
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Logistic(3) computed with the same model as popup's forecast table
+    const p3 = computeModelP3(data);
+    let pA3 = Number.isFinite(p3.pA) ? (p3.pA*100) : undefined;
+    let pB3 = Number.isFinite(p3.pB) ? (p3.pB*100) : undefined;
     const ml3 = favIsA ? { pFav3: pA3, pOpp3: pB3 } : { pFav3: pB3, pOpp3: pA3 };
+    // Non-BT (3): without/with H2H for favorite
+    const a3h_dec = Number(data?.playerA?.nonBTProbability3_h2h);
+    const b3h_dec = Number(data?.playerB?.nonBTProbability3_h2h);
+    const nbNo_dec = favIsA ? a3 : b3;
+    const nbWith_dec = favIsA ? a3h_dec : b3h_dec;
 
-    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name, nb3No: nbNo_dec, nb3With: nbWith_dec };
     const html = renderMinTwoSets(matchTop);
+    // Add Fav vs Opp compare right under the decision block
+    const a3h_dec2 = Number(data?.playerA?.nonBTProbability3_h2h);
+    const b3h_dec2 = Number(data?.playerB?.nonBTProbability3_h2h);
+    const cmpPayload_dec2 = {
+      favName: fav10.name,
+      oppName: opp10.name,
+      nbFavNo: favIsA ? a3 : b3,
+      nbFavWith: favIsA ? a3h_dec2 : b3h_dec2,
+      nbOppNo: favIsA ? b3 : a3,
+      nbOppWith: favIsA ? b3h_dec2 : a3h_dec2,
+      mlFav3: Number.isFinite(pA3) && Number.isFinite(pB3) ? (favIsA ? pA3 : pB3) : undefined,
+      mlOpp3: Number.isFinite(pA3) && Number.isFinite(pB3) ? (favIsA ? pB3 : pA3) : undefined,
+      idxFav3: fav10.p3,
+      idxOpp3: opp10.p3,
+      d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
+      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null
+    };
+    const htmlCmp2 = renderFavOppCompare(cmpPayload_dec2);
 
     const holder = document.createElement('div');
     holder.id = 'tsx-decision-holder';
@@ -836,9 +1120,52 @@ function renderMinTwoSets(match) {
     const inner = document.createElement('div');
     inner.style.maxWidth = '760px';
     inner.style.width = '100%';
-    inner.innerHTML = html;
+    inner.innerHTML = html + htmlCmp2;
     holder.appendChild(inner);
     container.insertBefore(holder, container.firstChild);
+    // Try to refresh H2H dots strictly from H2H (the popup extractor may load H2H slightly later)
+    try {
+      const makeDots = (tokensStr) => {
+        if (!tokensStr) return '';
+        const tokens = String(tokensStr).trim().split(/\s+/).filter(Boolean);
+        const mk = (cls, color) => `<span class=\"dot ${cls}\" title=\"${cls==='dot-win'?'win':'loss'}\" style=\"width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px rgba(0,0,0,0.12) inset;margin-right:3px;vertical-align:middle;background:${color};\"></span>`;
+        return tokens.map(t => (t === '🟢' ? mk('dot-win', '#22c55e') : mk('dot-loss', '#ef4444'))).join('');
+      };
+      let attempts = 0;
+      const id = setInterval(() => {
+        attempts++;
+        try {
+          const d = buildAnalyzeData({});
+          let baseVis = (d?.h2h && typeof d.h2h.visualization === 'string') ? d.h2h.visualization : '';
+          if (!baseVis) {
+            try {
+              const inline = document.getElementById('h2hVizInline');
+              if (inline) {
+                const spans = inline.querySelectorAll('.dot');
+                const tokens = [];
+                spans.forEach(el => { tokens.push(el.classList.contains('dot-win') ? '🟢' : '🔴'); });
+                baseVis = tokens.join(' ');
+              }
+            } catch(_) {}
+          }
+          const visStr = favIsA ? baseVis : baseVis.replace(/🟢|🔴/g, m => (m === '🟢' ? '🔴' : '🟢'));
+          const cell = holder.querySelector('.cmp-row.last10 .fav.last10');
+          if (cell) {
+            if (visStr && visStr.trim()) {
+              cell.innerHTML = makeDots(visStr);
+              clearInterval(id);
+            } else if (attempts >= 10) {
+              cell.innerHTML = '<span style="color:#64748b;">нет H2H</span>';
+              clearInterval(id);
+            }
+          } else {
+            clearInterval(id);
+          }
+        } catch(_) {
+          if (attempts >= 10) clearInterval(id);
+        }
+      }, 500);
+    } catch(_) {}
   }
 
   // Targeted insertion: place the "take-two-sets" block before a specific player name on tennis-score.pro/stats
@@ -875,40 +1202,46 @@ function renderMinTwoSets(match) {
     const B = { p10: b10, p5: b5, p3: b3, d5_10: (Number.isFinite(b5)&&Number.isFinite(b10))?(b5-b10):undefined, d3_5: (Number.isFinite(b3)&&Number.isFinite(b5))?(b3-b5):undefined, name: nameB };
     const fav10 = favIsA ? { ...A } : { ...B };
     const opp10 = favIsA ? { ...B } : { ...A };
-    // Independent Form(3) if available; else fallback
-    const computeFormP3c = (arr) => {
-      try{
-        const L = Array.isArray(arr)? arr.slice(0,3) : [];
-        let own=0, opp=0;
-        for (const m of L){
-          const sets = Array.isArray(m?.setsOwnOpponent)? m.setsOwnOpponent : [];
-          for (const [a,b] of sets){ own += (Number(a)||0); opp += (Number(b)||0); }
-        }
-        const tot = own + opp;
-        if (tot <= 0) return null;
-        return Math.round(100 * (own / tot));
-      }catch(_){ return null; }
-    };
-    let favForm3c = computeFormP3c(data?.recentsA10);
-    let oppForm3c = computeFormP3c(data?.recentsB10);
-    if (!favIsA){ const t1=favForm3c; favForm3c = oppForm3c; oppForm3c = t1; }
-    const form10 = (Number.isFinite(favForm3c) && Number.isFinite(oppForm3c))
-      ? { p3Fav: favForm3c, p3Opp: oppForm3c, _approx: false }
-      : { p3Fav: fav10.p3, p3Opp: opp10.p3, _approx: true };
-    // Logistic probabilities for the 3-game window (consistent with keys label)
-    const pA3_win = (typeof data?.logistic?.pA3 === 'number') ? data.logistic.pA3 : undefined;
-    const pB3_win = (typeof data?.logistic?.pB3 === 'number') ? data.logistic.pB3 : undefined;
-    const ml3 = favIsA
-      ? { pFav3: pA3_win, pOpp3: pB3_win }
-      : { pFav3: pB3_win, pOpp3: pA3_win };
-    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name };
+    const form10 = { p3Fav: fav10.p3, p3Opp: opp10.p3 };
+    // Logistic(3) computed with the same model as popup's forecast table
+    const p3b = computeModelP3(data);
+    const pA3_win = Number.isFinite(p3b.pA) ? (p3b.pA*100) : undefined;
+    const pB3_win = Number.isFinite(p3b.pB) ? (p3b.pB*100) : undefined;
+    const ml3 = favIsA ? { pFav3: pA3_win, pOpp3: pB3_win } : { pFav3: pB3_win, pOpp3: pA3_win };
+    // Non-BT (3): without/with H2H for favorite
+    const a3h_ins = Number(data?.playerA?.nonBTProbability3_h2h);
+    const b3h_ins = Number(data?.playerB?.nonBTProbability3_h2h);
+    const nbNo_ins = favIsA ? a3 : b3;
+    const nbWith_ins = favIsA ? a3h_ins : b3h_ins;
+    const matchTop = { fav: fav10, opp: opp10, form: form10, ml: ml3, baseProb: fav10.p10, confidence: undefined, favName: fav10.name, oppName: opp10.name, nb3No: nbNo_ins, nb3With: nbWith_ins };
 
     const htmlTop = renderMinTwoSets(matchTop);
     const holder = document.createElement('div');
     holder.id = 'tsx-min2-before-target';
     holder.style.width = '100%';
     holder.style.boxSizing = 'border-box';
-    holder.innerHTML = htmlTop;
+    // Build last-10 series tokens: STRICTLY H2H; if none — unavailable
+    const favH2H10_t = (favIsA ? (Array.isArray(data.h2hOrientedA)?data.h2hOrientedA:[]) : (Array.isArray(data.h2hOrientedB)?data.h2hOrientedB:[])).slice(0,10);
+    const tokens_t = favH2H10_t.map(m => { const own=Number(m?.finalScoreOwnOpponent?.own)||0; const opp=Number(m?.finalScoreOwnOpponent?.opponent)||0; return own>opp?'🟢':'🔴'; });
+    // Build compare block payload with last-10 series tokens
+    const cmpPayload_ins2 = {
+      favName: fav10.name,
+      oppName: opp10.name,
+      nbFavNo: nbNo_ins,
+      nbFavWith: nbWith_ins,
+      nbOppNo: favIsA ? b3 : a3,
+      nbOppWith: favIsA ? b3h_ins : a3h_ins,
+      mlFav3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pA3_win : pB3_win) : undefined,
+      mlOpp3: Number.isFinite(pA3_win) && Number.isFinite(pB3_win) ? (favIsA ? pB3_win : pA3_win) : undefined,
+      idxFav3: fav10.p3,
+      idxOpp3: opp10.p3,
+      d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
+      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
+      last10Avail: favH2H10_t.length > 0,
+      last10Tokens: favH2H10_t.length > 0 ? tokens_t.join(' ') : null
+    };
+    const htmlCmp_ins2 = renderFavOppCompare(cmpPayload_ins2);
+    holder.innerHTML = htmlTop + htmlCmp_ins2;
 
     // Prefer to place above the overall score/header block if present
     const topHeader = document.querySelector('.table-top');

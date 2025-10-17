@@ -23,8 +23,9 @@ import argparse
 import re
 import csv
 from datetime import datetime
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse, parse_qs, urlunparse, parse_qsl, quote, unquote
 from typing import List, Optional, Tuple, Set
+from urllib import request as _urlrequest, parse as _urlparse
 import threading
 import time
 
@@ -50,14 +51,28 @@ FONBET_URL = "https://fon.bet/live/table-tennis"
 FONBET_LOGIN_DEFAULT = "+7 916 261-82-40"
 FONBET_PASSWORD_DEFAULT = "zxascvdf2Z!"
 
+# Таймаут ожидания блока решения (может быть переопределён из аргументов)
+DECISION_WAIT_MS = 2000
+
 # Временно выключаем парсинг up-games (PREMATCH)
 PARSE_UPCOMING = False
 
+# Глобальный Telegram sender (устанавливается в run())
+_TG_SENDER = None  # type: Optional[callable]
+
+# Глобальный режим: сохранять/отправлять ВСЕ матчи (без требования GO/3/3/2/3)
+ALLOW_ALL = False
+
+# Telegram defaults (user-provided token) and chat id cache file
+TG_DEFAULT_TOKEN = "8329315036:AAHEfnAf4ER7YE_dqFIsOMoO-s1b5G4kYTA"
+TG_CHAT_ID_FILE = os.path.join(_HERE, ".telegram_chat_id")
+
 DEFAULT_FILTERS = [
-    "Лига Про. Чехия",
-    "Лига Про. Минск",
-    "Лига Про",
-    "Кубок ТТ. Польша",
+    # Общее правило: фильтруем по базовому названию лиги,
+    # т.к. после него могут идти разные города/страны.
+    "Лига Про",   # матчит любые варианты: "Лига Про. Минск", "Лига Про. Чехия" и т.п.
+    "Кубок ТТ",   # матчит: "Кубок ТТ. Польша", "Кубок ТТ. Чехия" и др.
+    "Сетка Кап",  # матчит любые варианты после "Сетка Кап ..."
 ]
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
@@ -219,7 +234,13 @@ FILTER_JS = r"""
 
 
 def _init_output_files():
-    """Hard-reset output files and create fresh CSV with header."""
+    """Hard-reset output files and create fresh CSV with header.
+    New format:
+      time,favorite,opponent,
+      noBT3_noH2H, noBT3_H2H, logistic3_fav, indexP3_fav,
+      nb3_fav_noH2H, nb3_fav_H2H, nb3_opp_noH2H, nb3_opp_H2H,
+      last10_fav, last10_opp, h2h_total, league, url
+    """
     paths = [
         (OUTPUT_LIVE_CSV, "matches_3of3.csv"),
         (OUTPUT_LIVE_CSV_COMPAT, "live_3of3.csv"),
@@ -235,14 +256,24 @@ def _init_output_files():
     # create empty CSV with header
     try:
         with open(OUTPUT_LIVE_CSV, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["timestamp", "favorite", "opponent", "reason", "url"])
+            csv.writer(f).writerow([
+                "time", "favorite", "opponent",
+                "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                "last10_fav", "last10_opp", "h2h_total", "league", "url"
+            ])
         print(f"[init] created header at {OUTPUT_LIVE_CSV}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV}: {e}")
     # инициализируем файл совместимости тем же заголовком
     try:
         with open(OUTPUT_LIVE_CSV_COMPAT, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["timestamp", "favorite", "opponent", "reason", "url"])
+            csv.writer(f).writerow([
+                "time", "favorite", "opponent",
+                "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                "last10_fav", "last10_opp", "h2h_total", "league", "url"
+            ])
         print(f"[init] created header at {OUTPUT_LIVE_CSV_COMPAT}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV_COMPAT}: {e}")
@@ -262,13 +293,100 @@ def run(filters: List[str]) -> None:
         context = None
         page = None
 
+        # Enable PREMATCH if requested
+        try:
+            if getattr(args, 'prematch', False):
+                global PARSE_UPCOMING
+                PARSE_UPCOMING = True
+        except Exception:
+            pass
+
+        # Учитываем флаг all: отключаем фильтрацию турниров и сохраняем все матчи
+        try:
+            if getattr(args, 'all', False):
+                # Пустая строка в ALLOWED заставляет фильтр пропускать все строки
+                filters[:] = [""]
+                global ALLOW_ALL
+                ALLOW_ALL = True
+        except Exception:
+            pass
+
+        # Setup Telegram sender if requested
+        try:
+            if getattr(args, 'tg', False):
+                token = getattr(args, 'tg_token', None) or TG_DEFAULT_TOKEN
+                chat_id = getattr(args, 'tg_chat', None)
+                # Try load cached chat id from file if not provided
+                if not chat_id:
+                    try:
+                        if os.path.exists(TG_CHAT_ID_FILE):
+                            with open(TG_CHAT_ID_FILE, 'r', encoding='utf-8') as fh:
+                                chat_id = fh.read().strip()
+                    except Exception:
+                        pass
+                # If still missing, try getUpdates (user must send any message to the bot first)
+                if not chat_id and token:
+                    try:
+                        url = f"https://api.telegram.org/bot{token}/getUpdates"
+                        with _urlrequest.urlopen(url, timeout=8) as resp:
+                            data = json.loads(resp.read().decode('utf-8'))
+                        if data.get('ok') and isinstance(data.get('result'), list) and data['result']:
+                            last = data['result'][-1]
+                            chat = (last.get('message') or last.get('channel_post') or {}).get('chat') or {}
+                            cid = chat.get('id')
+                            if cid is not None:
+                                chat_id = str(cid)
+                                try:
+                                    with open(TG_CHAT_ID_FILE, 'w', encoding='utf-8') as fh:
+                                        fh.write(chat_id)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                # If chat id provided explicitly, cache it
+                if chat_id and not os.path.exists(TG_CHAT_ID_FILE):
+                    try:
+                        with open(TG_CHAT_ID_FILE, 'w', encoding='utf-8') as fh:
+                            fh.write(str(chat_id))
+                    except Exception:
+                        pass
+                if token and chat_id:
+                    api_base = f"https://api.telegram.org/bot{token}/sendMessage"
+                    def _send(text: str):
+                        try:
+                            data = _urlparse.urlencode({
+                                'chat_id': chat_id,
+                                'text': text,
+                                'parse_mode': 'HTML',
+                                'disable_web_page_preview': 'true'
+                            }).encode('utf-8')
+                            req = _urlrequest.Request(api_base, data=data)
+                            _urlrequest.urlopen(req, timeout=10)
+                        except Exception:
+                            pass
+                    global _TG_SENDER
+                    _TG_SENDER = _send
+                    # Startup ping so user sees bot is alive
+                    try:
+                        ts = datetime.now().isoformat(timespec="seconds")
+                        _TG_SENDER(f"✅ Autobet started {ts}. Chat: {chat_id}")
+                    except Exception as e:
+                        try:
+                            print(f"[tg] warn: cannot send startup ping: {e}")
+                        except Exception:
+                            pass
+                else:
+                    print("[tg] Включено -tg, но не удалось определить chat_id. Напишите любое сообщение боту и перезапустите.")
+        except Exception:
+            pass
+
         if ext_path and os.path.isdir(ext_path):
             # Use persistent context to load extension
             user_data_dir = os.path.join(os.path.dirname(__file__), ".chromium-profile")
             os.makedirs(user_data_dir, exist_ok=True)
             context = p.chromium.launch_persistent_context(
                 user_data_dir,
-                headless=False,
+                headless=bool(getattr(args, 'headless', False)),
                 args=[
                     f"--disable-extensions-except={ext_path}",
                     f"--load-extension={ext_path}",
@@ -277,10 +395,17 @@ def run(filters: List[str]) -> None:
             page = context.new_page() if len(context.pages) == 0 else context.pages[0]
         else:
             # Regular non-persistent context (no extension)
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)))
             storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
             context = browser.new_context(storage_state=storage)
             page = context.new_page()
+
+        # Применим таймаут ожидания решения из аргументов
+        try:
+            global DECISION_WAIT_MS
+            DECISION_WAIT_MS = max(500, int(getattr(args, 'decision_wait_ms', DECISION_WAIT_MS)))
+        except Exception:
+            pass
 
         page.goto(URL, wait_until="domcontentloaded")
 
@@ -303,59 +428,61 @@ def run(filters: List[str]) -> None:
         page.evaluate(FILTER_JS % {"allowed": allowed_js})
 
         # Логи консоли страницы: по умолчанию показываем только наши сообщения с префиксом 'AUTO:'
-        try:
-            def _console(msg):
-                try:
-                    text = getattr(msg, "text", None)
-                    ctype = getattr(msg, "type", None)
-                    if callable(text):
-                        text = text()
-                    if callable(ctype):
-                        ctype = ctype()
-                    if os.getenv("AUTOBET_CONSOLE") or (isinstance(text, str) and "AUTO:" in text):
-                        print(f"[console:{ctype}] {text}")
-                except Exception:
-                    pass
-            page.on("console", _console)
-        except Exception:
-            pass
-
-        # Экспортируем функцию перезапуска в страницу и рендерим кнопку управления
-        # Также готовим мгновенное завершение по Enter
-        stop_event = threading.Event()
-
-        def _wait_for_enter():
+        if not getattr(args, 'headless', False):
             try:
-                input()
+                def _console(msg):
+                    try:
+                        text = getattr(msg, "text", None)
+                        ctype = getattr(msg, "type", None)
+                        if callable(text):
+                            text = text()
+                        if callable(ctype):
+                            ctype = ctype()
+                        if os.getenv("AUTOBET_CONSOLE") or (isinstance(text, str) and "AUTO:" in text):
+                            print(f"[console:{ctype}] {text}")
+                    except Exception:
+                        pass
+                page.on("console", _console)
             except Exception:
                 pass
-            stop_event.set()
 
-        try:
-            t = threading.Thread(target=_wait_for_enter, daemon=True)
-            t.start()
-            print("Нажмите Enter для немедленного завершения (live-сбор)")
-        except Exception:
-            pass
-        def _restart_from_ui():
-            # ВАЖНО: Playwright sync API не потокобезопасен —
-            # выполняем restart_scan в том же потоке, что и контекст/страница
+        # Экспортируем функцию перезапуска в страницу и рендерим кнопку управления
+        # Также готовим мгновенное завершение по Enter (только в видимом режиме)
+        stop_event = threading.Event()
+        # Активируем ожидание Enter и UI-кнопку только в интерактивном TTY-режиме
+        if not getattr(args, 'headless', False) and sys.stdin and sys.stdin.isatty():
+            def _wait_for_enter():
+                try:
+                    input()
+                except Exception:
+                    pass
+                stop_event.set()
+
             try:
-                restart_scan(context, page, filters, stop_event)
-                return True
+                t = threading.Thread(target=_wait_for_enter, daemon=True)
+                t.start()
+                print("Нажмите Enter для немедленного завершения (live-сбор)")
             except Exception:
-                return False
+                pass
+            def _restart_from_ui():
+                # ВАЖНО: Playwright sync API не потокобезопасен —
+                # выполняем restart_scan в том же потоке, что и контекст/страница
+                try:
+                    restart_scan(context, page, filters, stop_event)
+                    return True
+                except Exception:
+                    return False
 
-        try:
-            page.expose_function("autobetRestart", _restart_from_ui)
-        except Exception:
-            # Если уже экспортирована — игнорируем
-            pass
-        try:
-            page.evaluate(CONTROL_JS)
-            page.evaluate("console.info('AUTO:controls ready')")
-        except Exception:
-            pass
+            try:
+                page.expose_function("autobetRestart", _restart_from_ui)
+            except Exception:
+                # Если уже экспортирована — игнорируем
+                pass
+            try:
+                page.evaluate(CONTROL_JS)
+                page.evaluate("console.info('AUTO:controls ready')")
+            except Exception:
+                pass
 
         # Первый прогон
         try:
@@ -431,10 +558,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EXTENSION_PATH,
         help="Путь к Chrome-расширению (будет загружено в persistent-профиль)",
     )
+    # Фоновый режим (без окон): поддерживаем краткую форму -fon и длинную --headless
+    parser.add_argument("-fon", "--headless", dest="headless", action="store_true",
+                        help="Запуск Chromium в фоне (без окон). Требует поддержку headless-режима для расширений.")
     parser.add_argument("--fonbet-login", dest="fonbet_login", help="Логин (email/телефон) для fon.bet (или FONBET_LOGIN)")
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
     parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
+    parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
+                        help="Сколько миллисекунд ждать отрисовку блока решения (по умолчанию 2000)")
+    parser.add_argument("--prematch", dest="prematch", action="store_true",
+                        help="Также парсить up-games (PREMATCH) и сохранять в prema_3of3.csv")
+    # Telegram options
+    parser.add_argument("-tg", "--tg", dest="tg", action="store_true", help="Отправлять подходящие матчи в Telegram")
+    parser.add_argument("--tg-token", dest="tg_token", default=os.getenv("TELEGRAM_BOT_TOKEN", TG_DEFAULT_TOKEN), help="Telegram Bot API token (или TELEGRAM_BOT_TOKEN)")
+    parser.add_argument("--tg-chat", dest="tg_chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat id (или TELEGRAM_CHAT_ID)")
+    # Режим: сохранять и отправлять ВСЕ матчи, игнорируя условие GO/3/3/2/3; также отключает фильтр турниров
+    parser.add_argument("-all", "--all", dest="all", action="store_true",
+                        help="Парсить все матчи (без условия GO/3/3/2/3) и отправлять все страницы статистики. Отключает фильтрацию по турнирам.")
     return parser
 
 
@@ -591,27 +732,46 @@ def ensure_login(context, page, email: str, password: str) -> bool:
 
 # ---------------------- scanning/saving ----------------------
 
-def collect_filtered_stats_links(page) -> List[str]:
+def collect_filtered_stats_links(page) -> List[Tuple[str, Optional[str]]]:
     base = "https://tennis-score.pro"
     # Собираем видимые ссылки на страницу статистики из отфильтрованных строк
-    hrefs = set()
+    items: List[Tuple[str, Optional[str]]] = []
+    seen = set()
     anchors = page.locator("a[href*='/stats/?']")
     count = anchors.count()
     for i in range(count):
         a = anchors.nth(i)
         try:
             # пропустим элементы внутри скрытых строк фильтра
-            hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
+            hidden = a.evaluate("el => !!el.closest('__auto-filter-hidden__') || !!el.closest('.__auto-filter-hidden__')")
             if hidden:
                 continue
             href = a.get_attribute("href") or ""
             if not href or href.startswith("#"):
                 continue
             abs_url = urljoin(base, href)
-            hrefs.add(abs_url)
+            # Пытаемся угадать лигу по тексту строки
+            try:
+                row_text = a.evaluate("el => (el.closest('tr') || el.closest('.row') || el.closest('[role=\\'row\\']') || el).innerText || ''") or ""
+            except Exception:
+                row_text = ""
+            league_guess = None
+            if row_text:
+                tlow = str(row_text).lower()
+                for tok in DEFAULT_FILTERS:
+                    try:
+                        t = str(tok).strip()
+                        if t and t.lower() in tlow:
+                            league_guess = t
+                            break
+                    except Exception:
+                        continue
+            if abs_url not in seen:
+                items.append((abs_url, league_guess))
+                seen.add(abs_url)
         except Exception:
             continue
-    return list(hrefs)
+    return items
 
 
 def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
@@ -780,12 +940,18 @@ def extract_favorite_and_opponents(page, lp: Optional[str] = None, rp: Optional[
     return (fav, opponent, title, reason)
 
 
-def scan_and_save_stats(context, links: List[str], output_csv: str, processed_path: str, stop_event: Optional[threading.Event] = None) -> None:
+def scan_and_save_stats(context, links: List, output_csv: str, processed_path: str, stop_event: Optional[threading.Event] = None) -> None:
     processed = load_processed_urls(processed_path)
     skipped_processed = 0
     visited = 0
     saved = 0
-    for url in links:
+    for _item in links:
+        if isinstance(_item, (list, tuple)) and len(_item) >= 1:
+            url = _item[0]
+            league_hint = (_item[1] if len(_item) > 1 else None)
+        else:
+            url = _item
+            league_hint = None
         if stop_event is not None and stop_event.is_set():
             print("[stop] Прервано пользователем (Enter)")
             break
@@ -808,18 +974,140 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             except Exception:
                 pass
 
-            # Дожидаемся (до ~2 сек), пока расширение отрисует блок (GO/3/3/2/3)
-            # Независимый расчёт Формы(3) и логистики может занимать >1 сек
-            wait_for_decision_block(page, timeout_ms=2000)
+            # Дожидаемся (настраиваемое время), пока расширение отрисует блок (GO/3/3/2/3)
+            # Независимый расчёт Формы(3) и логистики может занимать > 1 сек
+            wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
             lp, rp = parse_players_from_stats_url(url)
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
-            if fav and opp and reason:
-                # время в формате HH:MM после GO/2/3/3/3
-                hhmm = datetime.now().strftime("%H:%M")
-                reason_with_time = f"{reason}, {hhmm}"
-                save_match_row(url, fav, opp, reason_with_time, output_csv)
+            # Если не нашли сразу — краткая повторная попытка
+            if not (fav and opp and reason):
+                try:
+                    page.wait_for_timeout(min(2000, max(500, DECISION_WAIT_MS // 2)))
+                except Exception:
+                    pass
+                fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+            if fav and opp and (reason or ALLOW_ALL):
+                # Извлечь метрики для новой строки CSV
+                metrics = _extract_metrics_for_csv(page, fav, opp)
+                # Попробовать извлечь последовательность last10 (кружочки)
+                last10_fav = None
+                last10_opp = None
+                nb3_fav_no = None
+                nb3_fav_h2 = None
+                nb3_opp_no = None
+                nb3_opp_h2 = None
+                try:
+                    # Короткое ожидание появления блока сравнения/точек
+                    try:
+                        page.wait_for_function("() => !!document.querySelector('.min2-compare .cmp-row.last10 .fav.last10 .dot, .fav.last10 .dot')", timeout=1200)
+                    except Exception:
+                        pass
+                    try:
+                        page.wait_for_function("() => !!document.querySelector('.table-top .total, .total')", timeout=1200)
+                    except Exception:
+                        pass
+                    hs = _extract_h2h_and_score(page, fav, opp) or {}
+                    last10_fav = hs.get('favDots') or None
+                    last10_opp = hs.get('oppDots') or None
+                    h2h_total = hs.get('score') or None
+                    # Попробуем вытащить nb3 без/с H2H для фаворита и оппонента
+                    try:
+                        cmp = _extract_compare_block(page)
+                    except Exception:
+                        cmp = None
+                    if isinstance(cmp, dict):
+                        nb = cmp.get('nb3') or {}
+                        fav_nb = nb.get('fav') or {}
+                        opp_nb = nb.get('opp') or {}
+                        def _num(x):
+                            try:
+                                return float(x) if isinstance(x, (int, float)) else (float(str(x).replace(',', '.')) if isinstance(x, str) and x else None)
+                            except Exception:
+                                return None
+                        nb3_fav_no = _num(fav_nb.get('noH2H'))
+                        nb3_fav_h2 = _num(fav_nb.get('h2h'))
+                        nb3_opp_no = _num(opp_nb.get('noH2H'))
+                        nb3_opp_h2 = _num(opp_nb.get('h2h'))
+                        # Fallbacks for dots and H2H score from compare block
+                        if not last10_fav:
+                            last10_fav = ((cmp.get('last10') or {}).get('favDots')) or last10_fav
+                        if not last10_opp:
+                            last10_opp = ((cmp.get('last10') or {}).get('oppDots')) or last10_opp
+                        if not h2h_total:
+                            h2h_total = cmp.get('h2hScore') or h2h_total
+                except Exception:
+                    pass
+                league = league_hint or _extract_league_name(page)
+                save_match_row(
+                    url, fav, opp, metrics, output_csv,
+                    last10_fav=last10_fav, last10_opp=last10_opp,
+                    nb3_fav_no=nb3_fav_no, nb3_fav_h2=nb3_fav_h2,
+                    nb3_opp_no=nb3_opp_no, nb3_opp_h2=nb3_opp_h2,
+                    h2h_total=h2h_total,
+                    league=league,
+                )
+                # Telegram notify if configured (new formatted message using compare block if available)
+                try:
+                    if _TG_SENDER:
+                        compare = _extract_compare_block(page)
+                        # Enrich/override H2H dots and score via generic DOM extractor
+                        try:
+                            # Wait up to ~4s in total for all key blocks
+                            page.wait_for_function(
+                                "() => !!document.querySelector('.min2-compare')",
+                                timeout=1200,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_function(
+                                "() => !!document.querySelector('.min2-compare .cmp-row.last10 .fav.last10 .dot, .fav.last10 .dot')",
+                                timeout=1800,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_function(
+                                "() => !!document.querySelector('table.kmp_srt_results.main-table tbody tr.personal-meetings')",
+                                timeout=1500,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_function(
+                                "() => !!document.querySelector('.table-top .total')",
+                                timeout=1500,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            hs = _extract_h2h_and_score(page, fav, opp)
+                        except Exception:
+                            hs = { 'favDots': None, 'oppDots': None, 'score': None }
+                        if not isinstance(compare, dict):
+                            compare = {
+                                'favName': fav,
+                                'oppName': opp,
+                                'nb3': { 'fav': {}, 'opp': {} },
+                                'ml3': { 'fav': None, 'opp': None },
+                                'idx3': { 'fav': None, 'opp': None },
+                                'd35': { 'fav': None, 'opp': None },
+                            }
+                        # Apply H2H data
+                        try:
+                            if hs.get('favDots') or hs.get('oppDots'):
+                                compare['h2hDots'] = { 'fav': hs.get('favDots'), 'opp': hs.get('oppDots') }
+                            if hs.get('score'):
+                                compare['h2hScore'] = hs.get('score')
+                        except Exception:
+                            pass
+                        league = league_hint or _extract_league_name(page)
+                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, compare.get('h2hScore'), league=league)
+                        _TG_SENDER(msg)
+                except Exception:
+                    pass
                 processed.add(url)  # помечаем как обработанный только при успешном сохранении
-                print(f"[saved:{reason}] {fav} vs {opp} ({url})")
+                print(f"[saved] {fav} vs {opp} ({url})")
                 saved += 1
             else:
                 print(f"[skip] Нет условий (GO/3/3/2/3) или не найден фав/опп: {url}")
@@ -855,13 +1143,676 @@ def parse_players_from_stats_url(url: str) -> Tuple[Optional[str], Optional[str]
         return None, None
 
 
-def save_match_row(url: str, favorite: str, opponent: str, reason: Optional[str], output_csv: str) -> None:
+def _canonical_stats_url(url: str) -> str:
+    """Ensure /stats URL has URL-encoded lp/rp parameters so links are clickable.
+    Safely re-encodes only lp/rp values, avoiding double-encoding.
+    """
+    try:
+        u = urlparse(url)
+        if "/stats" not in (u.path or ""):
+            return url
+        pairs = parse_qsl(u.query, keep_blank_values=True)
+        out = []
+        for k, v in pairs:
+            if k in ("lp", "rp") and isinstance(v, str):
+                v = quote(unquote(v), safe="")
+            out.append((k, v))
+        new_q = "&".join(f"{k}={v}" for k, v in out)
+        return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
+    except Exception:
+        return url
+
+def _norm_name(s: Optional[str]) -> str:
+    if not isinstance(s, str):
+        return ""
+    t = re.sub(r"\s+", " ", s).strip().lower()
+    try:
+        return t
+    except Exception:
+        return t
+
+
+def _extract_league_name(page) -> Optional[str]:
+    """Try to extract league/tournament name from the stats page.
+    Heuristic: look for known base tokens (DEFAULT_FILTERS) in the page text
+    and return the longest matching token; otherwise None.
+    """
+    try:
+        body = page.locator('body').inner_text(timeout=1500)
+    except Exception:
+        body = ''
+    if not body:
+        return None
+    text_low = body.lower()
+    candidates = []
+    for tok in (DEFAULT_FILTERS or []):
+        try:
+            t = str(tok).strip()
+            if not t:
+                continue
+            if t.lower() in text_low:
+                candidates.append(t)
+        except Exception:
+            continue
+    if candidates:
+        # prefer the longest token (e.g., 'Кубок ТТ' over 'Кубок')
+        candidates.sort(key=lambda s: (-len(s), s))
+        return candidates[0]
+    return None
+
+
+def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Parse page text to extract:
+    - noBT3_noH2H (favorite)
+    - noBT3_H2H (favorite)
+    - logistic3_fav
+    - indexP3_fav
+    Returns tuple of floats (percent values) or None if unavailable.
+    """
+    # 1a) Try reading directly from the injected min2-extract dataset
+    try:
+        v = page.evaluate(
+            "() => {\n"
+            "  const el = document.querySelector('.min2-extract');\n"
+            "  if (!el) return null;\n"
+            "  return { fav: el.dataset.fav||'', log3: el.dataset.log3||'', idx3: el.dataset.idx3||'' };\n"
+            "}"
+        )
+        if isinstance(v, dict):
+            def _f(x):
+                try:
+                    return float(str(x).replace(',', '.')) if str(x) else None
+                except Exception:
+                    return None
+            log3 = _f(v.get('log3'))
+            idx3 = _f(v.get('idx3'))
+            # NB values не выводятся в блоке — оставляем None
+            if log3 is not None or idx3 is not None:
+                return (None, None, log3, idx3)
+    except Exception:
+        pass
+
+    # 1b) Try structured extraction via content script if available
+    try:
+        data = page.evaluate("() => (typeof window.__tennisScoreExtract==='function' ? window.__tennisScoreExtract() : null)")
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        try:
+            nameA = (data.get('playerA') or {}).get('name')
+            nameB = (data.get('playerB') or {}).get('name')
+            i_fav = 0 if _norm_name(nameA) == _norm_name(fav) else (1 if _norm_name(nameB) == _norm_name(fav) else None)
+            # If names mismatch (e.g., diacritics), fallback: decide favorite by larger nonBT p10
+            if i_fav is None:
+                p10A = (data.get('playerA') or {}).get('nonBTProbability10')
+                p10B = (data.get('playerB') or {}).get('nonBTProbability10')
+                if isinstance(p10A, (int, float)) and isinstance(p10B, (int, float)):
+                    i_fav = 0 if p10A >= p10B else 1
+            # Extract metrics
+            if i_fav is not None:
+                A = data.get('playerA') or {}
+                B = data.get('playerB') or {}
+                favSide = A if i_fav == 0 else B
+                # Non-BT 3 no H2H / with H2H
+                nb_noh2h_3 = favSide.get('nonBTProbability3')
+                nb_h2h_3 = favSide.get('nonBTProbability3_h2h')
+                # Logistic p3 per playerA/B (percent)
+                logi = data.get('logistic') or {}
+                pA3 = logi.get('pA3'); pB3 = logi.get('pB3')
+                if isinstance(pA3, (int, float)) and isinstance(pB3, (int, float)):
+                    log3 = pA3 if i_fav == 0 else pB3
+                else:
+                    log3 = None
+                # Index P3 fav — используем p3 из блока индекса (совпадает с nonBTProbability3)
+                idx_p3 = favSide.get('nonBTProbability3')
+                def as_float(x):
+                    return float(x) if isinstance(x, (int, float)) else None
+                return (
+                    as_float(nb_noh2h_3),
+                    as_float(nb_h2h_3),
+                    as_float(log3),
+                    as_float(idx_p3),
+                )
+        except Exception:
+            pass
+
+    # 2) Fallback: parse from page text
+    try:
+        body = page.locator('body').inner_text(timeout=2000)
+    except Exception:
+        body = ""
+    text = re.sub(r"\s+", " ", body)
+
+    def to_num(s):
+        try:
+            return float(str(s).replace(',', '.'))
+        except Exception:
+            return None
+
+    # Non-BT (3) without and with H2H near favorite name section
+    nb_noh2h_3 = None
+    nb_h2h_3 = None
+    try:
+        # Search globally; choose the larger as favorite if anchors fail
+        fav_anchor = re.escape(fav)
+        m_anchor = re.search(fav_anchor, text, re.IGNORECASE)
+        # Flexible patterns allowing intermediate percents
+        pat_noh2h = re.compile(r"без\s*H2H.*?3\s*:\s*([\d.,]+)%", re.IGNORECASE)
+        pat_h2h   = re.compile(r"с\s*H2H.*?3\s*:\s*([\d.,]+)%", re.IGNORECASE)
+        if m_anchor:
+            # Take a local window around anchor but allow large span
+            start = max(0, m_anchor.start() - 400)
+            end = min(len(text), m_anchor.end() + 1200)
+            ctx = text[start:end]
+            m1 = pat_noh2h.search(ctx)
+            if m1:
+                nb_noh2h_3 = to_num(m1.group(1))
+            m2 = pat_h2h.search(ctx)
+            if m2:
+                nb_h2h_3 = to_num(m2.group(1))
+        # If still None, take the maximum pair from the whole page (favoring favorite)
+        if nb_noh2h_3 is None:
+            all_noh2h = [to_num(x) for x in pat_noh2h.findall(text)]
+            if all_noh2h:
+                nb_noh2h_3 = max(v for v in all_noh2h if v is not None)
+        if nb_h2h_3 is None:
+            all_h2h = [to_num(x) for x in pat_h2h.findall(text)]
+            if all_h2h:
+                nb_h2h_3 = max(v for v in all_h2h if v is not None)
+    except Exception:
+        pass
+
+    # Logistic model (3): pick the higher of two numbers (fav-oriented)
+    log3 = None
+    try:
+        m = re.search(r"Прогноз\s*\(логистическая модель\).*?Вероятность\s*\(3\)\s*([\d.,]+)%\s*([\d.,]+)%", text, re.IGNORECASE)
+        if m:
+            a = to_num(m.group(1)); b = to_num(m.group(2))
+            if a is not None and b is not None:
+                log3 = max(a, b)
+    except Exception:
+        pass
+
+    # Strength index/form (10): Probability (3) — take higher as favorite
+    idx_p3 = None
+    try:
+        m = re.search(r"Индекс силы и форма\s*\(10 игр\).*?Вероятность\s*\(3\)\s*([\d.,]+)%\s*([\d.,]+)%", text, re.IGNORECASE)
+        if m:
+            a = to_num(m.group(1)); b = to_num(m.group(2))
+            if a is not None and b is not None:
+                idx_p3 = max(a, b)
+    except Exception:
+        pass
+
+    return nb_noh2h_3, nb_h2h_3, log3, idx_p3
+
+
+def _extract_current_score(page) -> Optional[str]:
+    """Best-effort extraction of current match score from the stats page.
+    Returns a short string like "2:1" or None if not found.
+    """
+    # 1) Try to read obvious scoreboard-like nodes
+    try:
+        sel_candidates = [
+            "[class*='score']", "[class*='Score']", "[class*='scoreboard']",
+            "[data-test*='score']", "[data-testid*='score']",
+            "table.score, .match-score, .current-score",
+        ]
+        for sel in sel_candidates:
+            loc = page.locator(sel)
+            n = min(loc.count(), 6)
+            for i in range(n):
+                try:
+                    t = loc.nth(i).inner_text().strip()
+                except Exception:
+                    continue
+                if not t:
+                    continue
+                text = re.sub(r"\s+", " ", t)
+                # Prefer set-like small digits first
+                m = re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", text)
+                if not m:
+                    m = re.search(r"\b(\d{1,2})\s*[:\-–—]\s*(\d{1,2})\b", text)
+                if m:
+                    return f"{m.group(1)}:{m.group(2)}"
+    except Exception:
+        pass
+
+    # 2) Fallback: scan body text
+    try:
+        body = page.locator('body').inner_text(timeout=1500)
+    except Exception:
+        body = ""
+    if body:
+        text = re.sub(r"\s+", " ", body)
+        # Avoid matching times like 00:49 by preferring small numbers or nearby keywords
+        m = re.search(r"(?:сч[её]т|сеты|sets|по\s*сетам)[^\d]{0,20}(\d{1,2})\s*[:\-–—]\s*(\d{1,2})", text, re.IGNORECASE)
+        if not m:
+            m = re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", text)
+        if not m:
+            m = re.search(r"\b(\d{1,2})\s*[:\-–—]\s*(\d{1,2})\b", text)
+        if m:
+            return f"{m.group(1)}:{m.group(2)}"
+    return None
+
+
+def _extract_h2h_and_score(page, fav: Optional[str] = None, opp: Optional[str] = None) -> dict:
+    """Extract H2H dots (fav/opp) from DOM, preferably from a combined last10 row,
+    and an H2H score from a nearby <div class="total">L : R</div> within the same block.
+    Returns dict: { 'favDots': str|None, 'oppDots': str|None, 'score': str|None }.
+    """
+    try:
+        FAV = _norm_name(fav) if fav else ''
+        OPP = _norm_name(opp) if opp else ''
+        res = page.evaluate(
+            """
+            (FAV, OPP) => {
+              const out = { favDots: null, oppDots: null, score: null };
+              const normName = (s) => (s||'')
+                .replace(/[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\u1F000-\u1FAFF]/g,' ')
+                .replace(/^[^\p{L}\p{N}]+/gu,'')
+                .replace(/[^\p{L}\p{N}\s]+/gu,' ')
+                .replace(/\s+/g,' ').trim().toLowerCase();
+              const mapDots = (el) => {
+                if (!el) return null;
+                const dots = el.querySelectorAll('.dot');
+                if (!dots || dots.length === 0) return null;
+                const arr = [];
+                for (const d of dots) {
+                  arr.push(d.classList.contains('dot-win') ? '🟢' : (d.classList.contains('dot-loss') ? '🔴' : ''));
+                }
+                return arr.join('');
+              };
+              // Prefer exact block .min2-compare
+              const root = document.querySelector('.min2-compare') || document;
+              // Exact last10 node for favorite inside this block
+              let favLast = root.querySelector('.cmp-row.last10 .fav.last10');
+              if (!favLast) favLast = root.querySelector('.fav.last10');
+              // Opponent last10, if present as separate node
+              let oppLast = root.querySelector('.cmp-row.last10 .opp.last10');
+              if (!oppLast) oppLast = root.querySelector('.opp.last10');
+              let favDots = mapDots(favLast);
+              let oppDots = mapDots(oppLast);
+              if (!oppDots && favDots) {
+                oppDots = favDots.split('').map(ch => ch === '🟢' ? '🔴' : (ch === '🔴' ? '🟢' : ch)).join('');
+              }
+              out.favDots = favDots || null;
+              out.oppDots = oppDots || null;
+              // Fallback: build dots from H2H table rows (personal-meetings)
+              try {
+                if (!out.favDots || !out.oppDots) {
+                  // Detect left/right names from nearest .table-top
+                  let lName = '', rName = '';
+                  const nearTotal = (root.closest('#stats-base')||document).querySelector('.table-top .total');
+                  const nearTop = nearTotal ? nearTotal.closest('.table-top') : null;
+                  if (nearTop) {
+                    const nms = nearTop.querySelectorAll('.gamer-name');
+                    lName = nms && nms[0] ? nms[0].textContent : '';
+                    rName = nms && nms[1] ? nms[1].textContent : '';
+                  }
+                  lName = normName(lName); rName = normName(rName);
+                  const favIsLeft = !!(FAV && lName && FAV === lName);
+                  // Find H2H main table
+                  const base = (root.closest('#stats-base')||document);
+                  // Prefer non-clone main table
+                  let mainTbody = base.querySelector('table.kmp_srt_results.main-table:not(.clone) tbody');
+                  if (!mainTbody) mainTbody = base.querySelector('table.kmp_srt_results.main-table tbody');
+                  const rows = mainTbody ? Array.from(mainTbody.querySelectorAll('tr.personal-meetings')).slice(0, 12) : [];
+                  if (rows.length) {
+                    const seq = [];
+                    for (const tr of rows) {
+                      const leftWon = tr.classList.contains('win');
+                      const favWon = favIsLeft ? leftWon : !leftWon;
+                      seq.push(favWon ? '🟢' : '🔴');
+                    }
+                    if (seq.length) {
+                      out.favDots = seq.join('');
+                      out.oppDots = seq.map(ch => ch === '🟢' ? '🔴' : '🟢').join('');
+                    }
+                  }
+                }
+              } catch(_){ }
+              // Score from <div class="total">L : R</div>
+              // Score from DOM: prefer nearest .table-top .total relative to min2-compare
+              let L = null, R = null;
+              const findNearestTotal = (r) => {
+                if (!r) return document.querySelector('.table-top .total, .total');
+                // Check siblings after the compare block
+                let p = r.parentElement;
+                for (let n = r.nextElementSibling; n; n = n.nextElementSibling) {
+                  const t = n.querySelector('.table-top .total, .total');
+                  if (t) return t;
+                }
+                // Then siblings before
+                for (let n = r.previousElementSibling; n; n = n.previousElementSibling) {
+                  const t = n.querySelector('.table-top .total, .total');
+                  if (t) return t;
+                }
+                // Finally within parent
+                if (p) {
+                  const t = p.querySelector('.table-top .total, .total');
+                  if (t) return t;
+                }
+                return document.querySelector('.table-top .total, .total');
+              };
+              let cont = findNearestTotal(root);
+              if (cont) {
+                const s = (cont.innerText || cont.textContent || '').trim();
+                const m = s.match(/(\d{1,2})\s*[:\-–—]\s*(\d{1,2})/);
+                if (m) { L = m[1]; R = m[2]; }
+                // Try to orient by nearby gamer-name nodes
+                const row = cont.closest('.table-top') || cont.parentElement;
+                if (row) {
+                  const names = row.querySelectorAll('.gamer-name');
+                  let leftName = names && names[0] ? names[0].textContent : '';
+                  let rightName = names && names[1] ? names[1].textContent : '';
+                  leftName = normName(leftName);
+                  rightName = normName(rightName);
+                  if (L !== null && R !== null) {
+                    if (FAV && leftName && FAV === leftName) out.score = `${L}:${R}`;
+                    else if (FAV && rightName && FAV === rightName) out.score = `${R}:${L}`;
+                    else out.score = `${L}:${R}`;
+                  }
+                } else if (L !== null && R !== null) {
+                  out.score = `${L}:${R}`;
+                }
+              }
+              return out;
+            }
+            """,
+            FAV, OPP,
+        )
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    return { 'favDots': None, 'oppDots': None, 'score': None }
+
+
+def _extract_compare_block(page) -> Optional[dict]:
+    """Extracts values from new compare block (.min2-compare) rendered by the extension.
+    Returns a dict or None if the block is not found.
+    Dict shape:
+      {
+        'favName': str, 'oppName': str,
+        'nb3': {'fav': {'noH2H': float|None, 'h2h': float|None}, 'opp': {...}},
+        'ml3': {'fav': float|None, 'opp': float|None},
+        'idx3': {'fav': float|None, 'opp': float|None},
+        'd35': {'fav': str|None, 'opp': str|None},
+        'last10': {'favDots': str|None, 'favW': int|None, 'favL': int|None},
+      }
+    """
+    try:
+        data = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('.min2-compare');
+              if (!root) return null;
+              const pickNum = (s) => {
+                if (!s) return null;
+                const m = (s.match(/[\d.,]+/) || [])[0];
+                if (!m) return null;
+                const v = parseFloat(m.replace(',', '.'));
+                return Number.isFinite(v) ? v : null;
+              };
+              const text = (sel) => {
+                const el = root.querySelector(sel);
+                return el ? (el.innerText || el.textContent || '').trim() : '';
+              };
+              const favName = text('.cmp-head > div:nth-child(1)');
+              const oppName = text('.cmp-head > div:nth-child(2)');
+              const normName = (s) => (s||'')
+                .replace(/[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\u1F000-\u1FAFF]/g,' ')
+                .replace(/^[^\p{L}\p{N}]+/gu,'')
+                .replace(/[^\p{L}\p{N}\s]+/gu,' ')
+                .replace(/\s+/g,' ').trim().toLowerCase();
+              const nbFav = text('.cmp-row.nb3 .fav.nb3');
+              const nbOpp = text('.cmp-row.nb3 .opp.nb3');
+              const nbFav_no = pickNum((nbFav.match(/без\s*H2H\s*([^•]+)/i)||[])[1]||'');
+              const nbFav_h2 = pickNum((nbFav.match(/с\s*H2H\s*([^•]+)/i)||[])[1]||'');
+              const nbOpp_no = pickNum((nbOpp.match(/без\s*H2H\s*([^•]+)/i)||[])[1]||'');
+              const nbOpp_h2 = pickNum((nbOpp.match(/с\s*H2H\s*([^•]+)/i)||[])[1]||'');
+              const mlFav = pickNum(text('.cmp-row.ml3 .fav.ml3'));
+              const mlOpp = pickNum(text('.cmp-row.ml3 .opp.ml3'));
+              const idxFav = pickNum(text('.cmp-row.idx3 .fav.idx3'));
+              const idxOpp = pickNum(text('.cmp-row.idx3 .opp.idx3'));
+              const dFav = text('.cmp-row.d35 .fav.d35 .nb-win');
+              const dOpp = text('.cmp-row.d35 .opp.d35 .nb-win');
+              // last10 for fav and opp: map dots to emojis and count
+              const readDots = (el) => {
+                if (!el) return { dots: null, w: null, l: null };
+                const ds = Array.from(el.querySelectorAll('.dot'));
+                const parts = [];
+                let w = 0, l = 0;
+                for (const d of ds) {
+                  if (d.classList.contains('dot-win')) { parts.push('🟢'); w++; }
+                  else if (d.classList.contains('dot-loss')) { parts.push('🔴'); l++; }
+                }
+                return { dots: parts.join(''), w, l };
+              };
+              // Try strict selectors first
+              let favLastEl = root.querySelector('.cmp-row.last10 .fav.last10');
+              let oppLastEl = root.querySelector('.cmp-row.last10 .opp.last10');
+              // Fallbacks: tolerate markup variants
+              if (!favLastEl) favLastEl = root.querySelector('.last10 .fav, .fav.last10');
+              if (!oppLastEl) oppLastEl = root.querySelector('.last10 .opp, .opp.last10');
+              const rFav = readDots(favLastEl);
+              const rOpp = readDots(oppLastEl);
+              // Per user request: use last10 row as H2H series relative to favorite
+              let h2hFav = rFav;
+              let h2hOpp = rOpp && rOpp.dots ? rOpp : (function(){
+                const inv = (rFav.dots || '').split('').map(ch => ch === '🟢' ? '🔴' : (ch === '🔴' ? '🟢' : ch)).join('');
+                return { dots: inv, w: null, l: null };
+              })();
+              // Try to derive H2H score: prefer DOM total like <div class="total">5 : 5</div>
+              let h2hScore = null;
+              try {
+                const tot = root.querySelector('.total');
+                if (tot) {
+                  const t = (tot.innerText || tot.textContent || '').trim();
+                  const m = t.match(/(\d{1,2})\s*[:\-–—]\s*(\d{1,2})/);
+                  if (m) h2hScore = `${m[1]}:${m[2]}`; // left:right == fav:opp
+                }
+              } catch(_){ }
+              try {
+                if (!h2hScore) {
+                  const d = (typeof window.__tennisScoreExtract==='function') ? window.__tennisScoreExtract() : null;
+                  if (d && d.h2h && d.h2h.summary) {
+                  // Support multiple summary shapes
+                  let a = null, b = null;
+                  if (typeof d.h2h.summary.A === 'object') {
+                    a = Number(d.h2h.summary.A?.wins||0);
+                    b = Number(d.h2h.summary.B?.wins||0);
+                  }
+                  if ((a===null||b===null) && ("playerAWins" in d.h2h.summary || "playerBWins" in d.h2h.summary)) {
+                    a = Number(d.h2h.summary.playerAWins||0);
+                    b = Number(d.h2h.summary.playerBWins||0);
+                  }
+                  if (a===null || b===null) {
+                    a = Number(d.h2h.summary.AWins||0);
+                    b = Number(d.h2h.summary.BWins||0);
+                  }
+                  // Orient to fav name
+                  const nameA = (d.playerA && d.playerA.name) || '';
+                  const nameB = (d.playerB && d.playerB.name) || '';
+                  const favNorm = normName(favName||'');
+                  const aNorm = normName(nameA||'');
+                  const bNorm = normName(nameB||'');
+                  if (favNorm && (favNorm === aNorm)) h2hScore = `${a}:${b}`;
+                  else if (favNorm && (favNorm === bNorm)) h2hScore = `${b}:${a}`;
+                  else h2hScore = `${a}:${b}`; // default A:B
+                  }
+                }
+              } catch(_){ }
+              return {
+                favName, oppName,
+                nb3: { fav: { noH2H: nbFav_no, h2h: nbFav_h2 }, opp: { noH2H: nbOpp_no, h2h: nbOpp_h2 } },
+                ml3: { fav: mlFav, opp: mlOpp },
+                idx3: { fav: idxFav, opp: idxOpp },
+                d35: { fav: dFav || null, opp: dOpp || null },
+                last10: { favDots: rFav.dots, favW: rFav.w, favL: rFav.l, oppDots: rOpp.dots, oppW: rOpp.w, oppL: rOpp.l },
+                h2hDots: { fav: h2hFav.dots, opp: h2hOpp.dots },
+                h2hScore,
+              };
+            }
+            """
+        )
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict], fallback_metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], h2h_score: Optional[str] = None, league: Optional[str] = None) -> str:
+    """Compact message with aligned columns under player names.
+    Uses a <pre> block to keep spacing and aligns left/right values in columns
+    so each metric stays directly under the corresponding player name.
+    Also adds optional H2H score+dots as a separate line before the link.
+    """
+    ts = datetime.now().strftime('%H:%M')
+    # Escape helper
+    def esc(s: str) -> str:
+        return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
+
+    # Extract values if available
+    d_f = d_o = '—'
+    ml_f = ml_o = None
+    idx_f = idx_o = None
+    nb_fav_no = nb_fav_h2 = nb_opp_no = nb_opp_h2 = None
+    if isinstance(compare, dict):
+        try:
+            d35 = compare.get('d35') or {}
+            d_f = d35.get('fav') or d_f
+            d_o = d35.get('opp') or d_o
+            ml = compare.get('ml3') or {}
+            ml_f = ml.get('fav') if ml.get('fav') is not None else ml_f
+            ml_o = ml.get('opp') if ml.get('opp') is not None else ml_o
+            idx = compare.get('idx3') or {}
+            idx_f = idx.get('fav') if idx.get('fav') is not None else idx_f
+            idx_o = idx.get('opp') if idx.get('opp') is not None else idx_o
+            nb = compare.get('nb3') or {}
+            fav_nb = nb.get('fav') or {}
+            opp_nb = nb.get('opp') or {}
+            nb_fav_no = fav_nb.get('noH2H')
+            nb_fav_h2 = fav_nb.get('h2h')
+            nb_opp_no = opp_nb.get('noH2H')
+            nb_opp_h2 = opp_nb.get('h2h')
+        except Exception:
+            pass
+
+    # Fallback to metrics
+    if ml_f is None or idx_f is None:
+        no_bt_3, with_h2h_3, log3, idx3 = fallback_metrics
+        if ml_f is None and isinstance(log3, (int, float)):
+            ml_f = log3
+        if idx_f is None and isinstance(idx3, (int, float)):
+            idx_f = idx3
+
+    def pct0(v):
+        try:
+            return f"{float(v):.0f}%"
+        except Exception:
+            return '—'
+
+    # Build aligned two-column block inside <pre> ... </pre>
+    def s(v):
+        return '' if v is None else str(v)
+    left_title = s(fav)
+    right_title = s(opp)
+    # Compact two-sided lines without heavy alignment to reduce visual noise
+    # Center numeric values under player names, keep vertical bar under VS
+    def width(t: str) -> int:
+        try:
+            return len(t or '')
+        except Exception:
+            return len(str(t))
+    left_w = width(fav)
+    right_w = width(opp)
+    def center_to(text: str, w: int) -> str:
+        txt = s(text)
+        pad = max(0, w - width(txt))
+        left_pad = pad // 2
+        right_pad = pad - left_pad
+        return (' ' * left_pad) + txt + (' ' * right_pad)
+    # Build rows with a single central bar; avoid extra side bars to reduce wrap/shift.
+    def row(icon: str, lv: str, rv: str) -> str:
+        return f"{icon} {center_to(lv, left_w)} | {center_to(rv, right_w)}"
+    pre_lines = [
+        row('📈', d_f, s(d_o)),
+        row('👤', pct0(nb_fav_no), pct0(nb_opp_no)),
+        row('👥', pct0(nb_fav_h2), pct0(nb_opp_h2)),
+        row('📊', pct0(ml_f), pct0(ml_o)),
+        row('💪', pct0(idx_f), pct0(idx_o)),
+    ]
+    pre_block = "\n".join(pre_lines)
+
+    # Header lines (outside the table): time and player names
+    title_line = esc(f"🏆 {fav} VS  🚩{opp}")
+    # Build header time line with optional league
+    time_line = f"⏱ {ts}" + (f" {league}" if league else "")
+    parts = [
+        esc(time_line),
+        title_line,
+        f"<pre>{esc(pre_block)}</pre>",
+    ]
+    # Optional H2H dots line (relative to favorite only)
+    try:
+        if isinstance(compare, dict):
+            h2h = compare.get('h2hDots') or {}
+            # Prefer explicit H2H dots for favorite; fallback to last10 fav dots
+            hf = h2h.get('fav') or ((compare.get('last10') or {}).get('favDots') or '')
+            # Score: prefer arg h2h_score, fallback to compare.h2hScore
+            sc = (h2h_score or (compare.get('h2hScore') if isinstance(compare, dict) else None)) or ''
+            if hf:
+                def shorten(s: str, n: int = 10) -> str:
+                    s = s or ''
+                    return s[-n:] if len(s) > n else s
+                if sc:
+                    parts.append(esc(f"⚔️ ({sc}) {shorten(hf)}"))
+                else:
+                    parts.append(esc(f"⚔️ {shorten(hf)}"))
+    except Exception:
+        pass
+    link = esc(_canonical_stats_url(url))
+    parts.append(f"<a href=\"{link}\">Статистика</a>")
+    return "\n".join(parts)
+
+
+def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], output_csv: str,
+                   last10_fav: Optional[str] = None, last10_opp: Optional[str] = None,
+                   nb3_fav_no: Optional[float] = None, nb3_fav_h2: Optional[float] = None,
+                   nb3_opp_no: Optional[float] = None, nb3_opp_h2: Optional[float] = None,
+                   h2h_total: Optional[str] = None,
+                   league: Optional[str] = None) -> None:
     exists = os.path.exists(output_csv)
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if not exists:
-            w.writerow(["timestamp", "favorite", "opponent", "reason", "url"])  # заголовки
-        w.writerow([datetime.now().isoformat(timespec="seconds"), favorite, opponent, reason or "", url])
+            w.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                        "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                        "last10_fav", "last10_opp", "h2h_total", "league", "url"])  # заголовки
+        hhmmss = datetime.now().strftime("%H:%M:%S")
+        no_bt_3, with_h2h_3, log3, idx3 = metrics
+        w.writerow([
+            hhmmss,
+            favorite,
+            opponent,
+            (f"{no_bt_3:.1f}" if isinstance(no_bt_3, (int, float)) else ""),
+            (f"{with_h2h_3:.1f}" if isinstance(with_h2h_3, (int, float)) else ""),
+            (f"{log3:.0f}" if isinstance(log3, (int, float)) else ""),
+            (f"{idx3:.0f}" if isinstance(idx3, (int, float)) else ""),
+            (f"{nb3_fav_no:.1f}" if isinstance(nb3_fav_no, (int, float)) else ""),
+            (f"{nb3_fav_h2:.1f}" if isinstance(nb3_fav_h2, (int, float)) else ""),
+            (f"{nb3_opp_no:.1f}" if isinstance(nb3_opp_no, (int, float)) else ""),
+            (f"{nb3_opp_h2:.1f}" if isinstance(nb3_opp_h2, (int, float)) else ""),
+            (last10_fav or ""),
+            (last10_opp or ""),
+            (h2h_total or ""),
+            (league or ""),
+            _canonical_stats_url(url),
+        ])
     # Дублируем запись в файл обратной совместимости, если сохраняем live-матчи
     if output_csv == OUTPUT_LIVE_CSV and OUTPUT_LIVE_CSV_COMPAT:
         compat_exists = os.path.exists(OUTPUT_LIVE_CSV_COMPAT)
@@ -869,8 +1820,29 @@ def save_match_row(url: str, favorite: str, opponent: str, reason: Optional[str]
             with open(OUTPUT_LIVE_CSV_COMPAT, "a", newline="", encoding="utf-8") as f2:
                 w2 = csv.writer(f2)
                 if not compat_exists:
-                    w2.writerow(["timestamp", "favorite", "opponent", "reason", "url"])  # заголовки
-                w2.writerow([datetime.now().isoformat(timespec="seconds"), favorite, opponent, reason or "", url])
+                    w2.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                                 "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                                 "last10_fav", "last10_opp", "h2h_total", "league", "url"])  # заголовки
+                hhmmss = datetime.now().strftime("%H:%M:%S")
+                no_bt_3, with_h2h_3, log3, idx3 = metrics
+                w2.writerow([
+                    hhmmss,
+                    favorite,
+                    opponent,
+                    (f"{no_bt_3:.1f}" if isinstance(no_bt_3, (int, float)) else ""),
+                    (f"{with_h2h_3:.1f}" if isinstance(with_h2h_3, (int, float)) else ""),
+                    (f"{log3:.0f}" if isinstance(log3, (int, float)) else ""),
+                    (f"{idx3:.0f}" if isinstance(idx3, (int, float)) else ""),
+                    (f"{nb3_fav_no:.1f}" if isinstance(nb3_fav_no, (int, float)) else ""),
+                    (f"{nb3_fav_h2:.1f}" if isinstance(nb3_fav_h2, (int, float)) else ""),
+                    (f"{nb3_opp_no:.1f}" if isinstance(nb3_opp_no, (int, float)) else ""),
+                    (f"{nb3_opp_h2:.1f}" if isinstance(nb3_opp_h2, (int, float)) else ""),
+                    (last10_fav or ""),
+                    (last10_opp or ""),
+                    (h2h_total or ""),
+                    (league or ""),
+                    _canonical_stats_url(url),
+                ])
         except Exception as e:
             print(f"[save] warn: cannot write to {OUTPUT_LIVE_CSV_COMPAT}: {e}")
 
@@ -969,6 +1941,8 @@ def wait_for_decision_block(page, timeout_ms: int = 15000) -> bool:
         return page.wait_for_function(
             """
             () => {
+               const ex = document.querySelector('.min2-extract');
+               if (ex) return true;
                const el = document.querySelector('.take-two-sets');
                if (!el) return false;
                const t = el.innerText || '';

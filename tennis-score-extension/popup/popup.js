@@ -754,7 +754,127 @@ document.addEventListener('DOMContentLoaded', () => {
       if (sigLine) sigLine.style.display = 'none';
       if (warnLine) warnLine.style.display = 'none';
       if (subLine) subLine.style.display = 'none';
+      // Render small Fav vs Outsider compare under minimal forecast
+      try {
+        const host = document.getElementById('mfCompare');
+        if (host) {
+          const nameA = d?.playerA?.name || 'Игрок 1';
+          const nameB = d?.playerB?.name || 'Игрок 2';
+          const nbA3 = Number(d?.playerA?.nonBTProbability3);
+          const nbB3 = Number(d?.playerB?.nonBTProbability3);
+          const nbA3h = Number(d?.playerA?.nonBTProbability3_h2h);
+          const nbB3h = Number(d?.playerB?.nonBTProbability3_h2h);
+          // Compute logistic(3) like model block
+          const toPct1 = (v)=> (typeof v==='number' && isFinite(v) ? (Math.round(v*10)/10).toFixed(1)+'%' : '—');
+          const toPctInt = (v)=> (typeof v==='number' && isFinite(v) ? Math.round(v)+'%' : '—');
+          const recA10 = Array.isArray(d?.recentsA10)? d.recentsA10 : [];
+          const recB10 = Array.isArray(d?.recentsB10)? d.recentsB10 : [];
+          const setsAvgDiffPerSet = (rec)=>{ let diff=0, sets=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ const aa=+a||0, bb=+b||0; diff += (aa-bb); sets++; }); }); return sets? (diff/sets) : 0; };
+          const perMatchSetDiff = (rec)=> (rec||[]).map(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; let diff=0; s.forEach(([a,b])=>{ diff += ((+a||0) - (+b||0)); }); return s.length? (diff/s.length) : 0; });
+          const emaArr = (arr,a)=>{ if(!arr.length) return 0; let s=arr[0]; for(let i=1;i<arr.length;i++) s=a*arr[i]+(1-a)*s; return s; };
+          const slope3 = (arr)=>{ const L=arr.slice(0,3); const n=L.length; if(n<=1) return 0; let sx=0,sy=0,sxy=0,sxx=0; for(let i=0;i<n;i++){ const x=i+1,y=L[i]; sx+=x; sy+=y; sxy+=x*y; sxx+=x*x; } const den=n*sxx-sx*sx; return den? (n*sxy - sx*sy)/den : 0; };
+          const pointsSummaryDiff = (rec)=>{ let sum=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ sum += ((+a||0) - (+b||0)); }); }); return sum; };
+          const SstarA = Number(d?.playerA?.S_star); const SstarB = Number(d?.playerB?.S_star);
+          const EXT_A = Number(d?.playerA?.patterns?  ( (1-(d.playerA.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerA.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerA.patterns.tiebreak_losses?.rate||0))*20 + (d.playerA.patterns.decisive_fifth_wins?.rate||d.playerA.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+          const EXT_B = Number(d?.playerB?.patterns?  ( (1-(d.playerB.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerB.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerB.patterns.tiebreak_losses?.rate||0))*20 + (d.playerB.patterns.decisive_fifth_wins?.rate||d.playerB.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+          const STAB_A = Number(d?.playerA?.stability||0)*100; const STAB_B = Number(d?.playerB?.stability||0)*100;
+          const computeForWindow = (recA, recB, nLabel=3) => {
+            const A = recA, B = recB;
+            const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
+            const A_per = perMatchSetDiff(A), B_per = perMatchSetDiff(B);
+            const F_short_A = emaArr(A_per.slice(0,5), 0.7);
+            const F_short_B = emaArr(B_per.slice(0,5), 0.7);
+            const Trend_A = slope3(A_per); const Trend_B = slope3(B_per);
+            const NF = 6; let dF = ((F_short_A - F_short_B) + 0.5*(Trend_A - Trend_B)) / NF; dF = clamp(dF, -1, 1);
+            const NS = 0.5; let dS = (isFinite(SstarA)&&isFinite(SstarB))? ((SstarA - SstarB)/NS) : 0; dS = clamp(dS, -1, 1);
+            const A10 = setsAvgDiffPerSet(recA10), B10 = setsAvgDiffPerSet(recB10);
+            const A5  = setsAvgDiffPerSet(recA10.slice(0,5)),  B5  = setsAvgDiffPerSet(recB10.slice(0,5));
+            let baseD = 0.6*((A5-B5)) + 0.4*((A10-B10));
+            const favA3 = (Number(d?.playerA?.nonBTProbability3)||0) >= (Number(d?.playerB?.nonBTProbability3)||0);
+            const PDk_A  = pointsSummaryDiff(A);
+            let blow = 0; if (favA3){ if ((PDk_A||0)>=25) blow += 0.12; }
+            const hFav = favA3? (d?.h2hOrientedA||[]) : (d?.h2hOrientedB||[]);
+            const lostK = (k)=>{ let c=0; for(let i=0;i<Math.min(k,hFav.length);i++){ const fo=hFav[i]?.finalScoreOwnOpponent; const win = fo && Number(fo.own)>Number(fo.opponent); if (win===false) c++; } return c===k; };
+            if (lostK(2)) blow += 0.20; if (lostK(3)) blow += 0.35;
+            let dD = baseD - blow; const ND = 4; dD = clamp(dD/ND, -1, 1);
+            const pairRates = (()=>{ let tb=0,sets=0,long=0,m=0; [A,B].forEach(arr=>{ arr.forEach(mm=>{ const s=Array.isArray(mm.setsOwnOpponent)? mm.setsOwnOpponent:[]; if(s.length){ m++; if(s.length>=4) long++; } s.forEach(([a,b])=>{ const aa=+a||0,bb=+b||0; if(aa>=10&&bb>=10) tb++; sets++; }); }); }); return { tb: (sets? tb/sets:0), long:(m? long/m:0) }; })();
+            let ExtGap = (EXT_A - EXT_B)/100, StabTerm = (STAB_A - STAB_B)/100;
+            let dT_raw = 0.6*ExtGap + 0.2*StabTerm + 0.2*(pairRates.tb - 0.5) + 0.2*(pairRates.long - 0.5);
+            if (EXT_B - EXT_A >= 12 && favA3) dT_raw -= 0.25;
+            const NT = 0.7; let dT = clamp(dT_raw/NT, -1, 1);
+            const bF=0.35, bS=0.30, bD=0.25, bT=0.15, b0=0.0;
+            const z = b0 + bF*dF + bS*dS + bD*dD + bT*dT;
+            let pFav = 1/(1+Math.exp(-z));
+            const Pnb = ((Number(d?.playerA?.nonBTProbability3)||0)/100);
+            if (Pnb>=0.47 && Pnb<=0.53 && (EXT_A>=80 && EXT_B>=80)) pFav = 1/(1+Math.exp(-(z-0.35)));
+            if (favA3 && (PDk_A||0) >= 25) pFav = Math.min(pFav, 0.77);
+            if (lostK(2)) pFav = 1/(1+Math.exp(-(z-0.30)));
+            if (lostK(3)) pFav = 1/(1+Math.exp(-(z-0.50)));
+            const pA = (Number(d?.playerA?.nonBTProbability3)||0) >= (Number(d?.playerB?.nonBTProbability3)||0) ? pFav : (1-pFav);
+            const pB = 1 - pA;
+            return { pA, pB };
+          };
+          const out3 = computeForWindow(recA10.slice(0,3), recB10.slice(0,3), 3);
+          const mlA3 = (typeof out3?.pA === 'number') ? (out3.pA*100) : undefined;
+          const mlB3 = (typeof out3?.pB === 'number') ? (out3.pB*100) : undefined;
+          const favLbl = 'фаворит'; const dogLbl = 'аутсайдер';
+          const favHdr = `${favLbl} (${favName})`;
+          const dogHdr = `${dogLbl} (${dogName})`;
+          const nbLine = (x,y)=> [isFinite(x)? `без H2H ${Math.round(x)}%` : null, isFinite(y)? `с H2H ${Math.round(y)}%` : null].filter(Boolean).join(' • ');
+          // Orient by favSide0 computed above in this function
+          const favSide0 = (function(){
+            const nbA10 = (typeof d?.playerA?.nonBTProbability10 === 'number') ? d.playerA.nonBTProbability10/100
+                         : (typeof d?.playerA?.nonBTProbability === 'number') ? d.playerA.nonBTProbability/100 : null;
+            const nbB10 = (typeof d?.playerB?.nonBTProbability10 === 'number') ? d.playerB.nonBTProbability10/100
+                         : (typeof d?.playerB?.nonBTProbability === 'number') ? d.playerB.nonBTProbability/100 : null;
+            if (nbA10 != null && nbB10 != null) return (nbA10 >= nbB10) ? 'A' : 'B';
+            return 'A';
+          })();
+          const favName = (favSide0==='A'? nameA : nameB);
+          const dogName = (favSide0==='A'? nameB : nameA);
+          const nbFavNo = (favSide0==='A'? nbA3 : nbB3);
+          const nbFavWith = (favSide0==='A'? nbA3h : nbB3h);
+          const nbDogNo = (favSide0==='A'? nbB3 : nbA3);
+          const nbDogWith = (favSide0==='A'? nbB3h : nbA3h);
+          const mlFav3 = (favSide0==='A'? mlA3 : mlB3);
+          const mlDog3 = (favSide0==='A'? mlB3 : mlA3);
+          const idxFav3 = nbFavNo;
+          const idxDog3 = nbDogNo;
+          const html = `
+            <div class="min2-compare" style="background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
+              <div class="cmp-head" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #eee;background:#f7f7f7;">
+                <div style="padding:8px 10px;font-weight:600;">${favHdr}</div>
+                <div style="padding:8px 10px;font-weight:600;border-left:1px solid #eee;">${dogHdr}</div>
+              </div>
+              <div class="cmp-row nb3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
+                <div class="fav nb3" style="padding:8px 10px;">${nbLine(nbFavNo, nbFavWith)}</div>
+                <div class="opp nb3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${nbLine(nbDogNo, nbDogWith)}</div>
+              </div>
+              <div class="cmp-row ml3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
+                <div class="fav ml3" style="padding:8px 10px;">${toPct1(mlFav3)}</div>
+                <div class="opp ml3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${toPct1(mlDog3)}</div>
+              </div>
+              <div class="cmp-row idx3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;">
+                <div class="fav idx3" style="padding:8px 10px;">${toPctInt(idxFav3)}</div>
+                <div class="opp idx3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${toPctInt(idxDog3)}</div>
+              </div>
+            </div>`;
+          host.innerHTML = html;
+        }
+      } catch(_) {}
 // Optionally expose object for debugging/other UI
+      // Build lightweight tags for quick diagnostics (avoid ReferenceError if undefined)
+      const tags = (() => {
+        const t = [];
+        try {
+          if ((conflict>=2) || (conflictFav>=2)) t.push('high_conflict');
+          if (hvFlag) t.push('high_variance');
+          if (noBetML) t.push('no_bet_ml');
+          if (noBetTB) t.push('no_bet_tb');
+          if (noBetMarket) t.push('no_bet_market');
+        } catch(_) {}
+        return t;
+      })();
       d.minimal = {
         winner: {
           name: favRenderName,
@@ -2769,9 +2889,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // === Decision Summary (мини-блок) + "Возьмёт минимум 2 сета" ===
   function fillDecisionSummary(d) {
-    const cont = document.getElementById('decisionSummaryContainer');
-    if (!cont) return;
-    try {
+  const cont = document.getElementById('decisionSummaryContainer');
+  if (!cont) return;
+  try {
       const nameA = d?.playerA?.name || 'Игрок 1';
       const nameB = d?.playerB?.name || 'Игрок 2';
       const a10 = Number(d?.playerA?.nonBTProbability10 ?? d?.playerA?.nonBTProbability);
@@ -2884,7 +3004,39 @@ document.addEventListener('DOMContentLoaded', () => {
       if (score >= 5 || index >= 0.75) { verdict = '🟢 Надёжно — высокая вероятность победы'; color = '#0a0'; }
       else if (score <= 2 || index < 0.45) { verdict = '🔴 Рисково — перевес слабый, фаворит уязвим'; color = '#a00'; }
 
-      const dsHtml = '';
+      // Build an extra row with last up to 10 H2H games oriented relative to favorite
+      let dsHtml = '';
+      try {
+        const games = Array.isArray(d?.h2h?.h2hGames) ? d.h2h.h2hGames.slice() : [];
+        if (games.length) {
+          // Sort by date desc if Date objects available
+          games.sort((g1, g2) => {
+            const t1 = (g1 && g1.date && g1.date.getTime) ? g1.date.getTime() : 0;
+            const t2 = (g2 && g2.date && g2.date.getTime) ? g2.date.getTime() : 0;
+            return t2 - t1;
+          });
+          const take = games.slice(0, 10);
+          // Tokenize relative to favorite: 🟢 = win by favorite, 🔴 = loss by favorite
+          const tokens = take.map(g => {
+            const aWon = !!g.win; // win from A perspective
+            const favWon = favIsA ? aWon : !aWon;
+            return favWon ? '🟢' : '🔴';
+          });
+          const wins = tokens.filter(t => t === '🟢').length;
+          const losses = tokens.length - wins;
+          const dots = formatVisualization(tokens.join(' '));
+          dsHtml = `
+            <table class="mini-table" aria-label="H2H серия (последние 10, относительно фаворита)" style="margin-top:8px;">
+              <tbody>
+                <tr>
+                  <td style="white-space:nowrap; width:1%;">(${wins}:${losses})</td>
+                  <td>${dots}</td>
+                </tr>
+              </tbody>
+            </table>
+          `;
+        }
+      } catch (_) { /* ignore */ }
 
       // Min 2 sets block
       const opp_d5_10 = (Number.isFinite(opp.p5) && Number.isFinite(opp.p10)) ? (opp.p5 - opp.p10) : NaN;
@@ -2893,9 +3045,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // Абсолютное условие для логистической (3): > 53% за фаворита
       const passMl3 = favMl3Pct > 53;
       const mlRed = gapML3 < 0;
-      // Если форма(3) аппроксимируется тем же non-BT(3) (или численно совпадает), не удваиваем счётчик.
-      const sameMetric = Number.isFinite(gapNB3) && Number.isFinite(gapForm) && Math.abs(gapNB3 - gapForm) < 1e-9;
-      const matched = (passNoBt3?1:0) + ((passForm3 && !sameMetric)?1:0) + (passMl3?1:0);
+      const matched = (passNoBt3?1:0) + (passForm3?1:0) + (passMl3?1:0);
       // Индекс силы и форма: фаворит по окну 10 должен иметь P(3) > 55%
       const favP3Val = Number(fav?.p3);
       const passIdxBlock = Number.isFinite(favP3Val) && favP3Val > 55;
@@ -2908,11 +3058,19 @@ document.addEventListener('DOMContentLoaded', () => {
       else if (matched >= 2 && !mlRed) { v2 = 'GO'; c2color = '#0a0'; }
       const sign = (x)=>{ const n=Math.round(Number(x)||0); return (Number.isFinite(n)? ((n>=0?'+':'')+n+'%') : '—'); };
       const fmt10 = (v)=>{ const n=Number(v); return Number.isFinite(n)? (Math.round(n)+'%'):'—'; };
+      const favMl3Int_ = Number.isFinite(favMl3Pct) ? Math.round(favMl3Pct) : null;
+      const favIdx3Int_ = Number.isFinite(favP3Val) ? Math.round(favP3Val) : null;
+      const dataFav_ = String(favName || '').replace(/\"/g, '\\"');
+      const dataLog3_ = favMl3Int_ != null ? ` data-log3="${favMl3Int_}"` : '';
+      const dataIdx3_ = favIdx3Int_ != null ? ` data-idx3="${favIdx3Int_}"` : '';
       const min2Html = `
-        <div class="take-two-sets" style="background:${c2color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;">
-          <div style=\"font-size:14px;\">🔎 Решение: ${v2} | Совпадений: ${matched}/3 • Фаворит: ${favName}</div>
-          <div style=\"margin-top:2px;\">Ключи: БезBT(3) ${sign(gapNB3)}, Форма(3) ${sign(gapForm)}, Логист.(3) ${favMl3Pct}% (${sign(gapML3)})${mlRed?' (красная)':''}</div>
-          <div style=\"margin-top:2px;opacity:.95;font-weight:500;\">Фон (10): ${fmt10(fav.p10)} vs ${fmt10(opp.p10)}${shockOpp?` • У оппа форм-шок Δ(5−10) ${sign(opp_d5_10)}`:''}</div>
+        <div class=\"take-two-sets\" style=\"background:${c2color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;\">
+          <div style=\"font-size:14px;\">🔎 Решение: ${v2} | Совпадений: ${matched}/3</div>
+          <div class=\"min2-extract\" data-fav=\"${dataFav_}\"${dataLog3_}${dataIdx3_} style=\"margin-top:6px;border-top:1px solid rgba(255,255,255,.35);padding-top:6px;\">
+            <div>Фаворит ${favName}</div>
+            <div>${favMl3Int_ != null ? favMl3Int_ + '%' : '—'}</div>
+            <div>${favIdx3Int_ != null ? favIdx3Int_ + '%' : '—'}</div>
+          </div>
         </div>
       `;
 
@@ -3015,26 +3173,70 @@ document.addEventListener('DOMContentLoaded', () => {
       const nb3Fav = favIsA ? a3 : b3;
       const nb3Opp = favIsA ? b3 : a3;
       const gapNB3 = (Number.isFinite(nb3Fav) && Number.isFinite(nb3Opp)) ? (nb3Fav - nb3Opp) : NaN;
-      // В этом упрощённом пути формы(3) нет — используем приближение через non-BT(3).
-      // Это не должно удваивать сигнал, поэтому ниже не будем его считать отдельно в matched.
       const gapForm = gapNB3; // приближение формы(3) через non-BT(3)
 
-      // Logistic(3) from content
-      const pA3 = Number(d?.logistic?.pA3);
-      const pB3 = Number(d?.logistic?.pB3);
-      const favMl3Pct = Math.max(Number.isFinite(pA3)?pA3:NaN, Number.isFinite(pB3)?pB3:NaN);
-      const ml3Diff = (Number.isFinite(pA3) && Number.isFinite(pB3)) ? ( (favIsA? (pA3-pB3) : (pB3-pA3)) ) : NaN;
+      // Logistic(3) — вычисляем тем же методом, что и в таблице «Прогноз (логистическая модель)»
+      const clamp = (x,a,b)=> Math.max(a, Math.min(b, x));
+      const recA10 = Array.isArray(d?.recentsA10)? d.recentsA10 : [];
+      const recB10 = Array.isArray(d?.recentsB10)? d.recentsB10 : [];
+      const setsAvgDiffPerSet = (rec)=>{ let diff=0, sets=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ const aa=+a||0, bb=+b||0; diff += (aa-bb); sets++; }); }); return sets? (diff/sets) : 0; };
+      const perMatchSetDiff = (rec)=> (rec||[]).map(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; let diff=0; s.forEach(([a,b])=>{ diff += ((+a||0) - (+b||0)); }); return s.length? (diff/s.length) : 0; });
+      const emaArr = (arr,a)=>{ if(!arr.length) return 0; let s=arr[0]; for(let i=1;i<arr.length;i++) s=a*arr[i]+(1-a)*s; return s; };
+      const slope3 = (arr)=>{ const L=arr.slice(0,3); const n=L.length; if(n<=1) return 0; let sx=0,sy=0,sxy=0,sxx=0; for(let i=0;i<n;i++){ const x=i+1,y=L[i]; sx+=x; sy+=y; sxy+=x*y; sxx+=x*x; } const den=n*sxx-sx*sx; return den? (n*sxy - sx*sy)/den : 0; };
+      const pointsSummaryDiff = (rec)=>{ let sum=0; (rec||[]).forEach(m=>{ const s=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; s.forEach(([a,b])=>{ sum += ((+a||0) - (+b||0)); }); }); return sum; };
+      const SstarA = Number(d?.playerA?.S_star); const SstarB = Number(d?.playerB?.S_star);
+      const EXT_A = Number(d?.playerA?.patterns?  ( (1-(d.playerA.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerA.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerA.patterns.tiebreak_losses?.rate||0))*20 + (d.playerA.patterns.decisive_fifth_wins?.rate||d.playerA.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+      const EXT_B = Number(d?.playerB?.patterns?  ( (1-(d.playerB.patterns.loss_after_2_1_obj?.rate||0))*30 + (1-(d.playerB.patterns.loss_after_two_set_run?.rate||0))*30 + (1-(d.playerB.patterns.tiebreak_losses?.rate||0))*20 + (d.playerB.patterns.decisive_fifth_wins?.rate||d.playerB.patterns.win_at_2_2?.rate||0)*20 ) : 0);
+      const STAB_A = Number(d?.playerA?.stability||0)*100; const STAB_B = Number(d?.playerB?.stability||0)*100;
+      const computeForWindow3 = (recA, recB)=>{
+        const A = recA, B = recB;
+        const A_per = perMatchSetDiff(A), B_per = perMatchSetDiff(B);
+        const F_short_A = emaArr(A_per.slice(0,5), 0.7);
+        const F_short_B = emaArr(B_per.slice(0,5), 0.7);
+        const Trend_A = slope3(A_per); const Trend_B = slope3(B_per);
+        const NF = 6;
+        let dF = ((F_short_A - F_short_B) + 0.5*(Trend_A - Trend_B)) / NF; dF = clamp(dF, -1, 1);
+        const NS = 0.5; let dS = (isFinite(SstarA)&&isFinite(SstarB))? ((SstarA - SstarB)/NS) : 0; dS = clamp(dS, -1, 1);
+        const A10 = setsAvgDiffPerSet(recA10), B10 = setsAvgDiffPerSet(recB10);
+        const A5  = setsAvgDiffPerSet(recA10.slice(0,5)),  B5  = setsAvgDiffPerSet(recB10.slice(0,5));
+        let baseD = 0.6*((A5-B5)) + 0.4*((A10-B10));
+        const favA3  = (Number(d?.playerA?.nonBTProbability3)||0) >= (Number(d?.playerB?.nonBTProbability3)||0);
+        const PD5_A  = Number(d?.playerA?.pointsSummary5?.diff)||0;
+        const PDk_A  = pointsSummaryDiff(A);
+        let blow = 0; if (favA3){ if ((PDk_A||0)>=25) blow += 0.12; }
+        const hFav = favA3? (d?.h2hOrientedA||[]) : (d?.h2hOrientedB||[]);
+        const lostK = (k)=>{ let c=0; for(let i=0;i<Math.min(k,hFav.length);i++){ const fo=hFav[i]?.finalScoreOwnOpponent; const win = fo && Number(fo.own)>Number(fo.opponent); if (win===false) c++; } return c===k; };
+        if (lostK(2)) blow += 0.20; if (lostK(3)) blow += 0.35;
+        let dD = baseD - blow; const ND = 4; dD = clamp(dD/ND, -1, 1);
+        const pairRates = (()=>{ let tb=0,sets=0,long=0,m=0; [A,B].forEach(arr=>{ arr.forEach(mm=>{ const s=Array.isArray(mm.setsOwnOpponent)? mm.setsOwnOpponent:[]; if(s.length){ m++; if(s.length>=4) long++; } s.forEach(([a,b])=>{ const aa=+a||0,bb=+b||0; if(aa>=10&&bb>=10) tb++; sets++; }); }); }); return { tb: (sets? tb/sets:0), long:(m? long/m:0) }; })();
+        let ExtGap = (EXT_A - EXT_B)/100, StabTerm = (STAB_A - STAB_B)/100;
+        let dT_raw = 0.6*ExtGap + 0.2*StabTerm + 0.2*(pairRates.tb - 0.5) + 0.2*(pairRates.long - 0.5);
+        if (EXT_B - EXT_A >= 12 && favA3) dT_raw -= 0.25;
+        const NT = 0.7; let dT = clamp(dT_raw/NT, -1, 1);
+        const bF=0.35, bS=0.30, bD=0.25, bT=0.15, b0=0.0;
+        const z = b0 + bF*dF + bS*dS + bD*dD + bT*dT;
+        let pFav = 1/(1+Math.exp(-z));
+        const Pnb = ((Number(d?.playerA?.nonBTProbability3)||0)/100);
+        if (Pnb>=0.47 && Pnb<=0.53 && (EXT_A>=80 && EXT_B>=80)) pFav = 1/(1+Math.exp(-(z-0.35)));
+        if (favA3 && (PDk_A||0) >= 25) pFav = Math.min(pFav, 0.77);
+        if (lostK(2)) pFav = 1/(1+Math.exp(-(z-0.30)));
+        if (lostK(3)) pFav = 1/(1+Math.exp(-(z-0.50)));
+        const pA = favA3? pFav : (1-pFav);
+        return { pA, pB: 1-pA, favA: favA3 };
+      };
+      const out3 = computeForWindow3(recA10.slice(0,3), recB10.slice(0,3));
+      const favMl3Pct = (favIsA ? out3.pA : out3.pB) * 100;
+      const ml3Diff = NaN; // дифф не используем в коротком формате
 
       const passNoBt3 = Number.isFinite(gapNB3) && gapNB3 >= 15;
-      const passForm3 = Number.isFinite(gapForm) && gapForm >= 15; // дублирует non-BT в этом режиме
+      const passForm3 = Number.isFinite(gapForm) && gapForm >= 15;
       const passMl3   = Number.isFinite(favMl3Pct) && favMl3Pct > 53; // >53% обязательное
 
       // Индекс силы/форма (10): P(3) у фаворита >55%
       const favP3 = favIsA ? a3 : b3;
       const passIdx = Number.isFinite(favP3) && favP3 > 55;
 
-      // Не даём двойной счёт за один и тот же сигнал (форма≈non-BT):
-      const matched = (passNoBt3?1:0) + (passMl3?1:0) + 0;
+      const matched = (passNoBt3?1:0)+(passForm3?1:0)+(passMl3?1:0);
       let v2 = 'Осторожно';
       let color = '#aa0';
       if (!passMl3 || !passIdx || matched <= 1) { v2='PASS'; color='#a00'; }
@@ -3044,11 +3246,20 @@ document.addEventListener('DOMContentLoaded', () => {
       const fmtPct = (x)=> Number.isFinite(x)? (Math.round(x)+'%') : '—';
       const fmt10 = (x)=> Number.isFinite(x)? (Math.round(x)+'%') : '—';
 
+      const favMl3Int = Number.isFinite(favMl3Pct) ? Math.round(favMl3Pct) : null;
+      const favIdx3Int = Number.isFinite(favP3) ? Math.round(favP3) : null;
+      const dataFav = String(favName || '').replace(/\"/g, '\\"');
+      const dataLog3 = favMl3Int != null ? ` data-log3="${favMl3Int}"` : '';
+      const dataIdx3 = favIdx3Int != null ? ` data-idx3="${favIdx3Int}"` : '';
+
       const html = `
-        <div class="take-two-sets" style="background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;">
-          <div style="font-size:14px;">🔎 Решение: ${v2} | Совпадений: ${matched}/3 • Фаворит: ${favName}</div>
-          <div style="margin-top:2px;">Ключи: БезBT(3) ${sign(gapNB3)}, Форма(3) ${sign(gapForm)}, Логист.(3) ${fmtPct(favMl3Pct)} (${sign(ml3Diff)})</div>
-          <div style="margin-top:2px;opacity:.95;font-weight:500;">Фон (10): ${fmt10(a10)} vs ${fmt10(b10)}</div>
+        <div class=\"take-two-sets\" style=\"background:${color};color:#fff;padding:8px 12px;border-radius:10px;font:600 13px/1.3 system-ui;margin-bottom:8px;\">
+          <div style=\"font-size:14px;\">🔎 Решение: ${v2} | Совпадений: ${matched}/3</div>
+          <div class=\"min2-extract\" data-fav=\"${dataFav}\"${dataLog3}${dataIdx3} style=\"margin-top:6px;border-top:1px solid rgba(255,255,255,.35);padding-top:6px;\">
+            <div>Фаворит ${favName}</div>
+            <div>${favMl3Int != null ? favMl3Int + '%' : '—'}</div>
+            <div>${favIdx3Int != null ? favIdx3Int + '%' : '—'}</div>
+          </div>
         </div>`;
       cont.innerHTML = html;
     } catch(e){ cont.textContent = '—'; }

@@ -40,6 +40,10 @@ from open_tennis_live import (
     load_processed_urls,
     save_processed_urls,
     save_match_row,
+    _extract_metrics_for_csv,
+    _extract_h2h_and_score,
+    _extract_compare_block,
+    _extract_league_name,
 )
 
 
@@ -47,12 +51,11 @@ HERE = os.path.dirname(__file__)
 OUTPUT_PREMA_CSV = os.path.join(HERE, "prema_3of3.csv")
 PROCESSED_PREMA_JSON = os.path.join(HERE, "processed_prema_urls.json")
 
-# Parse only these leagues
+# Parse only these leagues (match by base words; city/country may vary)
 ALLOWED_LEAGUES = [
-    "Лига Про. Чехия",
-    "Лига Про. Минск",
-    "Лига Про",
-    "Кубок ТТ. Польша",
+    "Лига Про",   # matches: "Лига Про. Минск", "Лига Про. Чехия", etc.
+    "Кубок ТТ",   # matches: "Кубок ТТ. Польша", "Кубок ТТ. Чехия", etc.
+    "Сетка Кап",  # matches any variants following "Сетка Кап ..."
 ]
 
 # Small helper JS to count visible allowed matches and to limit visible rows to N
@@ -143,20 +146,18 @@ def init_outputs():
     try:
         with open(OUTPUT_PREMA_CSV, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["timestamp", "favorite", "opponent", "reason", "url"])
+            # Синхронизируем формат с live CSV
+            w.writerow([
+                "time", "favorite", "opponent",
+                "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                "last10_fav", "last10_opp", "h2h_total", "league", "url"
+            ])
             try:
                 f.flush(); os.fsync(f.fileno())
             except Exception:
                 pass
         print(f"[init] created header at {os.path.abspath(OUTPUT_PREMA_CSV)}")
-        # Быстрая проверка: файл действительно перезаписан и начинается с заголовка
-        try:
-            with open(OUTPUT_PREMA_CSV, "r", encoding="utf-8") as fr:
-                first_line = fr.readline().strip()
-            if first_line != "timestamp,favorite,opponent,reason,url":
-                print("[init] warn: header mismatch — файл мог не перезаписаться корректно")
-        except Exception:
-            pass
     except Exception as e:
         print(f"[init] error: cannot create header: {e}")
 
@@ -431,8 +432,86 @@ def run(filters: List[str]) -> int:
                 if reason and not opp:
                     opp = ""
                 if fav is not None and opp is not None and reason:
-                    hhmm = datetime.now().strftime("%H:%M")
-                    save_match_row(url, fav, opp, f"{reason}, {hhmm}", OUTPUT_PREMA_CSV)
+                    # Извлекаем метрики и дополнительные данные под новый формат CSV
+                    try:
+                        metrics = _extract_metrics_for_csv(active, fav, opp)
+                    except Exception:
+                        metrics = (None, None, None, None)
+                    # Ждём (по возможности) появления блоков с точками/таблицей
+                    try:
+                        active.wait_for_function(
+                            "() => !!document.querySelector('.min2-compare')",
+                            timeout=1200,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        active.wait_for_function(
+                            "() => !!document.querySelector('.min2-compare .cmp-row.last10 .fav.last10 .dot, .fav.last10 .dot')",
+                            timeout=1800,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        active.wait_for_function(
+                            "() => !!document.querySelector('table.kmp_srt_results.main-table tbody tr.personal-meetings')",
+                            timeout=1500,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        active.wait_for_function(
+                            "() => !!document.querySelector('.table-top .total, .total')",
+                            timeout=1200,
+                        )
+                    except Exception:
+                        pass
+                    # Точки last10 и nb3
+                    last10_fav = None
+                    last10_opp = None
+                    nb3_fav_no = nb3_fav_h2 = None
+                    nb3_opp_no = nb3_opp_h2 = None
+                    h2h_total = None
+                    try:
+                        hs = _extract_h2h_and_score(active, fav, opp) or {}
+                        last10_fav = hs.get('favDots') or None
+                        last10_opp = hs.get('oppDots') or None
+                        h2h_total = hs.get('score') or None
+                    except Exception:
+                        pass
+                    try:
+                        cmp = _extract_compare_block(active)
+                    except Exception:
+                        cmp = None
+                    if isinstance(cmp, dict):
+                        nb = cmp.get('nb3') or {}
+                        fav_nb = nb.get('fav') or {}
+                        opp_nb = nb.get('opp') or {}
+                        def _num(x):
+                            try:
+                                return float(x) if isinstance(x, (int, float)) else (float(str(x).replace(',', '.')) if isinstance(x, str) and x else None)
+                            except Exception:
+                                return None
+                        nb3_fav_no = _num(fav_nb.get('noH2H'))
+                        nb3_fav_h2 = _num(fav_nb.get('h2h'))
+                        nb3_opp_no = _num(opp_nb.get('noH2H'))
+                        nb3_opp_h2 = _num(opp_nb.get('h2h'))
+                        if not last10_fav:
+                            last10_fav = ((cmp.get('last10') or {}).get('favDots')) or last10_fav
+                        if not last10_opp:
+                            last10_opp = ((cmp.get('last10') or {}).get('oppDots')) or last10_opp
+                        if not h2h_total:
+                            h2h_total = cmp.get('h2hScore') or h2h_total
+
+                    league = _extract_league_name(active)
+                    save_match_row(
+                        url, fav, opp, metrics, OUTPUT_PREMA_CSV,
+                        last10_fav=last10_fav, last10_opp=last10_opp,
+                        nb3_fav_no=nb3_fav_no, nb3_fav_h2=nb3_fav_h2,
+                        nb3_opp_no=nb3_opp_no, nb3_opp_h2=nb3_opp_h2,
+                        h2h_total=h2h_total,
+                        league=league,
+                    )
                     processed.add(url)
                     saved += 1
                     print(f"[saved:{reason}] {fav} vs {opp}")
