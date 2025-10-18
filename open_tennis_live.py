@@ -60,8 +60,9 @@ PARSE_UPCOMING = False
 # Глобальный Telegram sender (устанавливается в run())
 _TG_SENDER = None  # type: Optional[callable]
 
-# Глобальный режим: сохранять/отправлять ВСЕ матчи (без требования GO/3/3/2/3)
-ALLOW_ALL = False
+# Глобальный режим по умолчанию: отправлять ВСЕ матчи (без требования GO/3/3/2/3)
+# Фильтр по лигам остаётся активным; флаг --all по-прежнему полностью убирает фильтр лиг.
+ALLOW_ALL = True
 
 # Telegram defaults (user-provided token) and chat id cache file
 TG_DEFAULT_TOKEN = "8329315036:AAHEfnAf4ER7YE_dqFIsOMoO-s1b5G4kYTA"
@@ -283,12 +284,21 @@ def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
 
     args = parse_args_for_runtime()
+    global ALLOW_ALL, PARSE_UPCOMING
 
     # Гарантированно очищаем файлы результатов перед запуском браузера
     _init_output_files()
 
     with sync_playwright() as p:
         ext_path = os.path.expanduser(args.extension_path) if hasattr(args, "extension_path") and args.extension_path else None
+        # Настройка прокси: берём из --proxy или переменных окружения
+        proxy_cfg = None
+        try:
+            if getattr(args, 'proxy', None):
+                proxy_cfg = { 'server': str(args.proxy) }
+                print(f"[net] proxy enabled: {args.proxy}")
+        except Exception:
+            pass
 
         context = None
         page = None
@@ -296,7 +306,6 @@ def run(filters: List[str]) -> None:
         # Enable PREMATCH if requested
         try:
             if getattr(args, 'prematch', False):
-                global PARSE_UPCOMING
                 PARSE_UPCOMING = True
         except Exception:
             pass
@@ -306,7 +315,13 @@ def run(filters: List[str]) -> None:
             if getattr(args, 'all', False):
                 # Пустая строка в ALLOWED заставляет фильтр пропускать все строки
                 filters[:] = [""]
-                global ALLOW_ALL
+                ALLOW_ALL = True
+        except Exception:
+            pass
+
+        # Новый режим: слать все матчи, но только из выбранных лиг (фильтр лиг сохраняем)
+        try:
+            if getattr(args, 'all_in_leagues', False) or os.getenv('AUTOBET_ALL_IN_LEAGUES'):
                 ALLOW_ALL = True
         except Exception:
             pass
@@ -387,6 +402,7 @@ def run(filters: List[str]) -> None:
             context = p.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=bool(getattr(args, 'headless', False)),
+                proxy=proxy_cfg,
                 args=[
                     f"--disable-extensions-except={ext_path}",
                     f"--load-extension={ext_path}",
@@ -395,7 +411,7 @@ def run(filters: List[str]) -> None:
             page = context.new_page() if len(context.pages) == 0 else context.pages[0]
         else:
             # Regular non-persistent context (no extension)
-            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)))
+            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)), proxy=proxy_cfg)
             storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
             context = browser.new_context(storage_state=storage)
             page = context.new_page()
@@ -407,7 +423,14 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
-        page.goto(URL, wait_until="domcontentloaded")
+        try:
+            page.goto(URL, wait_until="domcontentloaded", timeout=20000)
+        except Exception as e:
+            print("Ошибка: Page.goto не открыл live:", e)
+            print("Подсказка: проверьте интернет/VPN/прокси.\n"
+                  " - Можно запустить с --proxy=http://host:port (или AUTOBET_PROXY).\n"
+                  " - Убедитесь, что выполнены 'pip install playwright' и 'playwright install'.")
+            raise
 
         # Try to dismiss common cookie popups quickly (best-effort, ignore failures)
         for text in ("Принять", "Согласен", "Accept", "I Agree"):
@@ -502,8 +525,19 @@ def run(filters: List[str]) -> None:
         if interval_sec is None:
             interval_sec = 60
 
-        print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
-        deadline = time.monotonic() + bg_minutes * 60
+        # Поддержка бесконечного режима при bg_minutes <= 0
+        infinite = False
+        try:
+            infinite = int(bg_minutes) <= 0
+        except Exception:
+            infinite = False
+
+        if infinite:
+            print(f"[bg] Бесконечный режим: шаг {interval_sec} сек")
+            deadline = float('inf')
+        else:
+            print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
+            deadline = time.monotonic() + bg_minutes * 60
         try:
             while time.monotonic() < deadline and not stop_event.is_set():
                 try:
@@ -558,17 +592,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EXTENSION_PATH,
         help="Путь к Chrome-расширению (будет загружено в persistent-профиль)",
     )
+    # Proxy settings for Chromium (helps if сайт заблокирован/требуется VPN)
+    parser.add_argument(
+        "--proxy",
+        dest="proxy",
+        default=os.getenv("AUTOBET_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"),
+        help="HTTP(S) прокси: например http://user:pass@host:port (либо AUTOBET_PROXY/HTTPS_PROXY/HTTP_PROXY)",
+    )
     # Фоновый режим (без окон): поддерживаем краткую форму -fon и длинную --headless
     parser.add_argument("-fon", "--headless", dest="headless", action="store_true",
                         help="Запуск Chromium в фоне (без окон). Требует поддержку headless-режима для расширений.")
     parser.add_argument("--fonbet-login", dest="fonbet_login", help="Логин (email/телефон) для fon.bet (или FONBET_LOGIN)")
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
-    parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
+    parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30,
+                        help="Сколько минут сканировать в фоне (0 или <0 — бесконечно, по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
                         help="Сколько миллисекунд ждать отрисовку блока решения (по умолчанию 2000)")
     parser.add_argument("--prematch", dest="prematch", action="store_true",
                         help="Также парсить up-games (PREMATCH) и сохранять в prema_3of3.csv")
+    parser.add_argument("--all-in-leagues", dest="all_in_leagues", action="store_true",
+                        help="Отправлять статистику по ВСЕМ матчам ТОЛЬКО из выбранных лиг (игнорировать GO/3/3)")
     # Telegram options
     parser.add_argument("-tg", "--tg", dest="tg", action="store_true", help="Отправлять подходящие матчи в Telegram")
     parser.add_argument("--tg-token", dest="tg_token", default=os.getenv("TELEGRAM_BOT_TOKEN", TG_DEFAULT_TOKEN), help="Telegram Bot API token (или TELEGRAM_BOT_TOKEN)")
@@ -976,7 +1020,10 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
 
             # Дожидаемся (настраиваемое время), пока расширение отрисует блок (GO/3/3/2/3)
             # Независимый расчёт Формы(3) и логистики может занимать > 1 сек
-            wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
+            try:
+                wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
+            except Exception:
+                pass
             lp, rp = parse_players_from_stats_url(url)
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
             # Если не нашли сразу — краткая повторная попытка
@@ -986,6 +1033,34 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                 except Exception:
                     pass
                 fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+            # Если режим ALLOW_ALL и не определён фаворит — подставим имена из URL/DOM
+            if ALLOW_ALL and (not fav or not opp):
+                try:
+                    # Попробуем взять из URL
+                    lp2, rp2 = parse_players_from_stats_url(url)
+                    if not fav and lp2:
+                        fav = lp2
+                    if not opp and rp2:
+                        opp = rp2
+                    # Если ещё нет — из DOM
+                    if not fav or not opp:
+                        names = page.evaluate("""
+                            () => {
+                              const set = new Set();
+                              const add = s => { if (s) { s = String(s).trim(); if (s && s.length <= 40) set.add(s); } };
+                              document.querySelectorAll('.table-top .gamer-name, a[href*="/players/"]').forEach(el => add(el.textContent));
+                              const arr = Array.from(set).filter(Boolean);
+                              return arr.slice(0,2);
+                            }
+                        """) or []
+                        if isinstance(names, list):
+                            if not fav and len(names) >= 1:
+                                fav = names[0]
+                            if not opp and len(names) >= 2:
+                                opp = names[1]
+                except Exception:
+                    pass
+
             if fav and opp and (reason or ALLOW_ALL):
                 # Извлечь метрики для новой строки CSV
                 metrics = _extract_metrics_for_csv(page, fav, opp)
@@ -1095,8 +1170,10 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                             }
                         # Apply H2H data
                         try:
-                            if hs.get('favDots') or hs.get('oppDots'):
-                                compare['h2hDots'] = { 'fav': hs.get('favDots'), 'opp': hs.get('oppDots') }
+                            h2h_f = (hs.get('h2hFav') if isinstance(hs, dict) else None) or hs.get('favDots')
+                            h2h_o = (hs.get('h2hOpp') if isinstance(hs, dict) else None) or hs.get('oppDots')
+                            if h2h_f or h2h_o:
+                                compare['h2hDots'] = { 'fav': h2h_f, 'opp': h2h_o }
                             if hs.get('score'):
                                 compare['h2hScore'] = hs.get('score')
                         except Exception:
@@ -1408,7 +1485,7 @@ def _extract_h2h_and_score(page, fav: Optional[str] = None, opp: Optional[str] =
         res = page.evaluate(
             """
             (FAV, OPP) => {
-              const out = { favDots: null, oppDots: null, score: null };
+              const out = { favDots: null, oppDots: null, h2hFav: null, h2hOpp: null, score: null };
               const normName = (s) => (s||'')
                 .replace(/[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\u1F000-\u1FAFF]/g,' ')
                 .replace(/^[^\p{L}\p{N}]+/gu,'')
@@ -1439,9 +1516,8 @@ def _extract_h2h_and_score(page, fav: Optional[str] = None, opp: Optional[str] =
               }
               out.favDots = favDots || null;
               out.oppDots = oppDots || null;
-              // Fallback: build dots from H2H table rows (personal-meetings)
+              // Build H2H dots from personal-meetings table if present
               try {
-                if (!out.favDots || !out.oppDots) {
                   // Detect left/right names from nearest .table-top
                   let lName = '', rName = '';
                   const nearTotal = (root.closest('#stats-base')||document).querySelector('.table-top .total');
@@ -1467,11 +1543,10 @@ def _extract_h2h_and_score(page, fav: Optional[str] = None, opp: Optional[str] =
                       seq.push(favWon ? '🟢' : '🔴');
                     }
                     if (seq.length) {
-                      out.favDots = seq.join('');
-                      out.oppDots = seq.map(ch => ch === '🟢' ? '🔴' : '🟢').join('');
+                      out.h2hFav = seq.join('');
+                      out.h2hOpp = seq.map(ch => ch === '🟢' ? '🔴' : '🟢').join('');
                     }
                   }
-                }
               } catch(_){ }
               // Score from <div class="total">L : R</div>
               // Score from DOM: prefer nearest .table-top .total relative to min2-compare
@@ -1599,6 +1674,11 @@ def _extract_compare_block(page) -> Optional[dict]:
               if (!oppLastEl) oppLastEl = root.querySelector('.last10 .opp, .opp.last10');
               const rFav = readDots(favLastEl);
               const rOpp = readDots(oppLastEl);
+              // Visualization rows for each player (recent results, not H2H)
+              let favVizEl = root.querySelector('.cmp-row.viz .fav.viz');
+              let oppVizEl = root.querySelector('.cmp-row.viz .opp.viz');
+              const rFavViz = readDots(favVizEl);
+              const rOppViz = readDots(oppVizEl);
               // Per user request: use last10 row as H2H series relative to favorite
               let h2hFav = rFav;
               let h2hOpp = rOpp && rOpp.dots ? rOpp : (function(){
@@ -1652,6 +1732,7 @@ def _extract_compare_block(page) -> Optional[dict]:
                 idx3: { fav: idxFav, opp: idxOpp },
                 d35: { fav: dFav || null, opp: dOpp || null },
                 last10: { favDots: rFav.dots, favW: rFav.w, favL: rFav.l, oppDots: rOpp.dots, oppW: rOpp.w, oppL: rOpp.l },
+                viz10:  { favDots: rFavViz.dots, oppDots: rOppViz.dots },
                 h2hDots: { fav: h2hFav.dots, opp: h2hOpp.dots },
                 h2hScore,
               };
@@ -1721,30 +1802,91 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
         return '' if v is None else str(v)
     left_title = s(fav)
     right_title = s(opp)
-    # Compact two-sided lines without heavy alignment to reduce visual noise
-    # Center numeric values under player names, keep vertical bar under VS
+    # Compact two-sided lines and center values under names, keep central bar under VS
+    # Visual width that treats emoji/symbols as double-width to stabilize alignment
+    EMO_WIDE = set('🟢🔴🟩🟥📈👤👥📊💪🏆🚩→↑↓±')
     def width(t: str) -> int:
+        s0 = '' if t is None else str(t)
+        w = 0
+        for ch in s0:
+            code = ord(ch)
+            if ch in EMO_WIDE or 0x1F300 <= code <= 0x1FAFF:
+                w += 2
+            else:
+                w += 1
+        return w
+    # Color mark for logistic (📊): <52 red, >52 green, =52 neutral
+    def mark(v):
         try:
-            return len(t or '')
+            f = float(v)
+            if f > 52: return '🟩'  # green square
+            if f < 52: return '🟥'  # red square
+            return ''
         except Exception:
-            return len(str(t))
-    left_w = width(fav)
-    right_w = width(opp)
-    def center_to(text: str, w: int) -> str:
+            return ''
+    # Prepare raw value strings
+    val_d_f = s(d_f)
+    val_d_o = s(d_o)
+    val_nb_no_f = pct0(nb_fav_no)
+    val_nb_no_o = pct0(nb_opp_no)
+    val_nb_h2_f = pct0(nb_fav_h2)
+    val_nb_h2_o = pct0(nb_opp_h2)
+    val_ml_f = pct0(ml_f)
+    val_ml_o = pct0(ml_o)
+    mlf = mark(ml_f); mlo = mark(ml_o)
+    # Left side: marker before value; Right side: value before marker
+    val_ml_f_col = (f"{mlf} {val_ml_f}" if mlf else val_ml_f)
+    val_ml_o_col = (f"{val_ml_o} {mlo}" if mlo else val_ml_o)
+    val_idx_f = pct0(idx_f)
+    val_idx_o = pct0(idx_o)
+    # Last 10 games dots per player from compare.viz10 if available (fallback to last10/H2H visualization)
+    last10_fav = last10_opp = None
+    try:
+        if isinstance(compare, dict):
+            v10 = compare.get('viz10') or {}
+            let_f = v10.get('favDots') or ''
+            let_o = v10.get('oppDots') or ''
+            # fallback to previous last10 block (which might be H2H visualization)
+            if not let_f and not let_o:
+                l10 = compare.get('last10') or {}
+                let_f = l10.get('favDots') or ''
+                let_o = l10.get('oppDots') or ''
+            last10_fav = let_f if isinstance(let_f, str) and let_f else None
+            last10_opp = let_o if isinstance(let_o, str) and let_o else None
+            # Fallback: if only one side present, invert
+            if (not last10_opp) and last10_fav:
+                last10_opp = ''.join('🔴' if ch == '🟢' else ('🟢' if ch == '🔴' else ch) for ch in last10_fav)
+    except Exception:
+        pass
+    left_vals = [val_d_f, val_nb_no_f, val_nb_h2_f, val_ml_f_col, val_idx_f] + ([last10_fav] if last10_fav else [])
+    right_vals = [val_d_o, val_nb_no_o, val_nb_h2_o, val_ml_o_col, val_idx_o] + ([last10_opp] if last10_opp else [])
+    left_w = max(width(fav), max(width(v) for v in left_vals))
+    right_w = max(width(opp), max(width(v) for v in right_vals))
+    def align(text: str, w: int, mode: str = 'center') -> str:
         txt = s(text)
         pad = max(0, w - width(txt))
+        if mode == 'right':
+            return (' ' * pad) + txt
+        if mode == 'left':
+            return txt + (' ' * pad)
+        # center
         left_pad = pad // 2
         right_pad = pad - left_pad
         return (' ' * left_pad) + txt + (' ' * right_pad)
-    # Build rows with a single central bar; avoid extra side bars to reduce wrap/shift.
+    # Build rows with a single central bar.
+    # Keep a fixed-width icon column so the central bar stays perfectly aligned.
+    ICONS = ['📈','👤','👥','📊','💪']
+    icon_col_w = max(width(ic) for ic in ICONS) + 1  # add one space after icon
     def row(icon: str, lv: str, rv: str) -> str:
-        return f"{icon} {center_to(lv, left_w)} | {center_to(rv, right_w)}"
+        pad_after_icon = max(0, icon_col_w - (width(icon)))
+        # Right-align left column; left-align right column for stability
+        return f"{icon}{' ' * pad_after_icon}{align(lv, left_w, 'right')} | {align(rv, right_w, 'left')}"
     pre_lines = [
-        row('📈', d_f, s(d_o)),
-        row('👤', pct0(nb_fav_no), pct0(nb_opp_no)),
-        row('👥', pct0(nb_fav_h2), pct0(nb_opp_h2)),
-        row('📊', pct0(ml_f), pct0(ml_o)),
-        row('💪', pct0(idx_f), pct0(idx_o)),
+        row('📈', val_d_f, val_d_o),
+        row('👤', val_nb_no_f, val_nb_no_o),
+        row('👥', val_nb_h2_f, val_nb_h2_o),
+        row('📊', val_ml_f_col, val_ml_o_col),
+        row('💪', val_idx_f, val_idx_o),
     ]
     pre_block = "\n".join(pre_lines)
 
@@ -1755,24 +1897,33 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
     parts = [
         esc(time_line),
         title_line,
-        f"<pre>{esc(pre_block)}</pre>",
     ]
-    # Optional H2H dots line (relative to favorite only)
+    # Show last 10 games per player directly under names
+    try:
+        if isinstance(compare, dict):
+            l10 = (compare.get('last10') or {})
+            lf = last10_fav or (l10.get('favDots') or '')
+            lo = last10_opp or (l10.get('oppDots') or '')
+            if not lo and lf:
+                lo = ''.join('🔴' if ch == '🟢' else ('🟢' if ch == '🔴' else ch) for ch in lf)
+            if lf or lo:
+                parts.append(esc(f"🏆 {lf}"))
+                parts.append("──────────────")
+                parts.append(esc(f"🚩 {lo}"))
+    except Exception:
+        pass
+    parts.append(f"<pre>{esc(pre_block)}</pre>")
+    # Restore H2H line relative to favorite
     try:
         if isinstance(compare, dict):
             h2h = compare.get('h2hDots') or {}
-            # Prefer explicit H2H dots for favorite; fallback to last10 fav dots
-            hf = h2h.get('fav') or ((compare.get('last10') or {}).get('favDots') or '')
-            # Score: prefer arg h2h_score, fallback to compare.h2hScore
+            hf = h2h.get('fav') or ''
             sc = (h2h_score or (compare.get('h2hScore') if isinstance(compare, dict) else None)) or ''
             if hf:
                 def shorten(s: str, n: int = 10) -> str:
                     s = s or ''
                     return s[-n:] if len(s) > n else s
-                if sc:
-                    parts.append(esc(f"⚔️ ({sc}) {shorten(hf)}"))
-                else:
-                    parts.append(esc(f"⚔️ {shorten(hf)}"))
+                parts.append(esc(f"⚔️ {shorten(hf)}" if not sc else f"⚔️ ({sc}) {shorten(hf)}"))
     except Exception:
         pass
     link = esc(_canonical_stats_url(url))

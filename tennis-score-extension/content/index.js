@@ -237,6 +237,11 @@ function renderFavOppCompare(payload) {
   const last10Html = last10Avail
     ? (last10Tokens ? `${formatDots(last10Tokens)}` : '')
     : '<span style="color:#64748b;">нет H2H</span>';
+  // Visualization rows (per-player recent results)
+  const visFavTokens = payload?.visFavTokens || '';
+  const visOppTokens = payload?.visOppTokens || '';
+  const visFavHtml = visFavTokens ? formatDots(visFavTokens) : '';
+  const visOppHtml = visOppTokens ? formatDots(visOppTokens) : '';
 
   return `
     <div class="min2-compare" style="margin-top:8px;background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
@@ -260,6 +265,11 @@ function renderFavOppCompare(payload) {
         <div class="fav d35" style="padding:8px 10px;">${formatDelta(d35Fav)}</div>
         <div class="opp d35" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${formatDelta(d35Opp)}</div>
       </div>
+      ${`
+      <div class="cmp-row viz" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
+        <div class="fav viz" style="padding:8px 10px;">${visFavHtml}</div>
+        <div class="opp viz" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${visOppHtml}</div>
+      </div>`}
       ${`
       <div class="cmp-row last10" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
         <div class="fav last10" style="padding:8px 10px; grid-column: 1 / span 2;">${last10Html}</div>
@@ -960,7 +970,9 @@ function renderFavOppCompare(payload) {
       d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
       d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
       last10Avail: Number(data?.h2h?.total) > 0,
-      last10Tokens: tokens_ins || null
+      last10Tokens: tokens_ins || null,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
     };
     const htmlCmp_ins = renderFavOppCompare(cmpPayload_ins);
     // Build compare block (fav vs outsider) right under the decision block
@@ -982,7 +994,9 @@ function renderFavOppCompare(payload) {
       d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
       d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
       last10Avail: Number(data?.h2h?.total) > 0,
-      last10Tokens: tokens_dec || null
+      last10Tokens: tokens_dec || null,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
     };
     const htmlCmp = renderFavOppCompare(cmpPayload_dec);
 
@@ -1108,7 +1122,9 @@ function renderFavOppCompare(payload) {
       idxFav3: fav10.p3,
       idxOpp3: opp10.p3,
       d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
-      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null
+      d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
     };
     const htmlCmp2 = renderFavOppCompare(cmpPayload_dec2);
 

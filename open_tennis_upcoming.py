@@ -477,8 +477,13 @@ def run(filters: List[str]) -> int:
                         last10_fav = hs.get('favDots') or None
                         last10_opp = hs.get('oppDots') or None
                         h2h_total = hs.get('score') or None
+                        # Prefer dedicated H2H dots if provided
+                        if isinstance(hs, dict) and (hs.get('h2hFav') or hs.get('h2hOpp')):
+                            compare_h2h = {'fav': hs.get('h2hFav'), 'opp': hs.get('h2hOpp')}
+                        else:
+                            compare_h2h = None
                     except Exception:
-                        pass
+                        compare_h2h = None
                     try:
                         cmp = _extract_compare_block(active)
                     except Exception:
@@ -502,6 +507,8 @@ def run(filters: List[str]) -> int:
                             last10_opp = ((cmp.get('last10') or {}).get('oppDots')) or last10_opp
                         if not h2h_total:
                             h2h_total = cmp.get('h2hScore') or h2h_total
+                        if not compare_h2h and isinstance(cmp, dict) and cmp.get('h2hDots'):
+                            compare_h2h = cmp.get('h2hDots')
 
                     league = _extract_league_name(active)
                     save_match_row(

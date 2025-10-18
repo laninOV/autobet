@@ -5,6 +5,14 @@
 __pycache__/
 *.pyc
 .venv/
+.python-version
+.env
+.env.*
+.vscode/
+.idea/
+
+# Local secrets/tokens
+.telegram_chat_id
 
 # Playwright auth/profile and browser cache
 tennis_auth_state.json
@@ -14,7 +22,14 @@ tennis_auth_state.json
 # Output artifacts
 *.csv
 processed_*.json
+logs/
+*.log
+*.pid
 
 # Archives
 *.zip
 
+# Node/extension build artefacts (if present)
+node_modules/
+dist/
+build/
