@@ -1178,6 +1178,14 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                                 'idx3': { 'fav': None, 'opp': None },
                                 'd35': { 'fav': None, 'opp': None },
                             }
+                        # Override names from compare header if present (cleaned)
+                        try:
+                            fn = _clean_name(compare.get('favName')) if isinstance(compare, dict) else None
+                            on = _clean_name(compare.get('oppName')) if isinstance(compare, dict) else None
+                            if fn and on:
+                                fav, opp = fn, on
+                        except Exception:
+                            pass
                         # Apply H2H data
                         try:
                             h2h_f = (hs.get('h2hFav') if isinstance(hs, dict) else None) or hs.get('favDots')
@@ -1190,6 +1198,10 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                             pass
                         league = league_hint or _extract_league_name(page)
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, compare.get('h2hScore'), league=league)
+                        try:
+                            msg = _cleanup_tg_text(msg)
+                        except Exception:
+                            pass
                         _TG_SENDER(msg)
                 except Exception:
                     pass
@@ -1258,19 +1270,49 @@ def _norm_name(s: Optional[str]) -> str:
     except Exception:
         return t
 
+def _clean_name(s: Optional[str]) -> Optional[str]:
+    """Strip emojis/symbols and excessive spaces from a player name.
+    Returns a readable name or None.
+    """
+    if not isinstance(s, str):
+        return None
+    # Remove most emoji/symbol ranges and trim
+    t = re.sub(r"[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\U0001F000-\U0001FAFF]", " ", s)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t or None
+
 
 def _extract_league_name(page) -> Optional[str]:
     """Try to extract league/tournament name from the stats page.
     Heuristic: look for known base tokens (DEFAULT_FILTERS) in the page text
     and return the longest matching token; otherwise None.
     """
+    # 1) Try common selectors near the header/breadcrumbs
     try:
-        body = page.locator('body').inner_text(timeout=1500)
+        text_candidates = page.evaluate(
+            """
+            () => {
+              const pick = (sel) => Array.from(document.querySelectorAll(sel))
+                 .map(el => (el.innerText||el.textContent||'').trim()).filter(Boolean);
+              const arr = [];
+              arr.push(...pick('.breadcrumbs, .breadcrumb, nav[aria-label="breadcrumb"]'));
+              arr.push(...pick('.table-top, .container-xl .mb-5, .container-xl'));
+              arr.push(...pick('h1, h2, .badge, .label, .tournament, .league'));
+              return arr.slice(0, 50).join('\n');
+            }
+            """
+        ) or ''
     except Exception:
-        body = ''
-    if not body:
+        text_candidates = ''
+    # 2) Fallback to full body text
+    if not text_candidates:
+        try:
+            text_candidates = page.locator('body').inner_text(timeout=1500)
+        except Exception:
+            text_candidates = ''
+    if not text_candidates:
         return None
-    text_low = body.lower()
+    text_low = str(text_candidates).lower()
     candidates = []
     for tok in (DEFAULT_FILTERS or []):
         try:
@@ -1945,6 +1987,14 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
     link = esc(_canonical_stats_url(url))
     parts.append(f"<a href=\"{link}\">Статистика</a>")
 
+    # FCI (Final Composite Index) — simplified ensemble from compare block
+    try:
+        fci_line = _compute_fci_line(compare, fav)
+        if fci_line:
+            parts.append(esc(fci_line))
+    except Exception:
+        pass
+
     # Краткая строка: Марков–BT и Топ-счёт (по 5 играм, без H2H)
     try:
         mbt_line = _compute_markov_bt_line(compare)
@@ -1957,6 +2007,38 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
 
 
 # ---------------------- Markov + Bradley–Terry block ----------------------
+def _cleanup_tg_text(text: str) -> str:
+    """Remove unwanted verbose lines like 'Fav ...', '🎯 Фаворит:', 'Комитет', 'Базовая оценка модели'."""
+    try:
+        bad = (
+            r"^\s*Fav\b.*$",
+            r"^\s*🎯\s*Фаворит\s*:.*$",
+            r"^\s*Фаворит\s*:.*$",
+            r"^\s*Базовая\s+оценка\s+модели.*$",
+            r"^\s*Комитет.*$",
+            r"^\s*комитет.*$",
+            r"^\s*Calibr.*$",
+            r"^\s*Калибр.*$",
+        )
+        lines = [ln for ln in str(text).split("\n") if ln is not None]
+        out = []
+        for ln in lines:
+            low = ln.strip()
+            if any(re.search(p, low, flags=re.IGNORECASE) for p in bad):
+                continue
+            out.append(ln)
+        # collapse multiple blank lines
+        cleaned = []
+        prev_blank = False
+        for ln in out:
+            is_blank = (ln.strip() == '')
+            if is_blank and prev_blank:
+                continue
+            cleaned.append(ln)
+            prev_blank = is_blank
+        return "\n".join(cleaned).strip()
+    except Exception:
+        return text
 def _dots_to_wl(s: Optional[str], limit: int = 5) -> Tuple[int, int]:
     """Convert dots string like '🟢🔴…' to (wins, losses) for last `limit` items."""
     if not s:
@@ -2007,6 +2089,88 @@ def _markov_best_of_5(p: float) -> dict:
     pb = p03 + p13 + p23
     return {'3:0': p30, '3:1': p31, '3:2': p32, '0:3': p03, '1:3': p13, '2:3': p23, 'P(A)': pa, 'P(B)': pb}
 
+
+def _compute_fci_line(compare: Optional[dict], fav_name: Optional[str] = None) -> Optional[str]:
+    """Compute a simplified FCI from the compare dict and return a single-line text
+    like "<Fav> — FCI: NN%". Missing components are ignored and weights renormalized.
+    Components used (if present):
+      - base3: nb3.fav.h2h or nb3.fav.noH2H
+      - form3: idx3.fav
+      - logit3: ml3.fav
+      - mbt: last-5 wins share for fav vs opp from viz10/last10
+    """
+    if not isinstance(compare, dict):
+        return None
+    try:
+        # Percent helpers
+        def pct01(x):
+            try:
+                if x is None:
+                    return None
+                if isinstance(x, (int, float)):
+                    v = float(x)
+                    return v/100.0 if v > 1 else (v if 0 <= v <= 1 else None)
+                v = float(str(x).replace(',', '.'))
+                return v/100.0 if v > 1 else (v if 0 <= v <= 1 else None)
+            except Exception:
+                return None
+
+        # Base3 from non-BT (prefer with H2H)
+        base3 = None
+        try:
+            nb = compare.get('nb3') or {}
+            fav_nb = nb.get('fav') or {}
+            base3 = pct01(fav_nb.get('h2h')) or pct01(fav_nb.get('noH2H'))
+        except Exception:
+            pass
+        # Form3 from index block
+        form3 = None
+        try:
+            idx = compare.get('idx3') or {}
+            form3 = pct01(idx.get('fav'))
+        except Exception:
+            pass
+        # Logit3
+        logit3 = None
+        try:
+            ml = compare.get('ml3') or {}
+            logit3 = pct01(ml.get('fav'))
+        except Exception:
+            pass
+        # MBT from last-5 tokens (viz10 preferred, fallback to last10)
+        mbt = None
+        try:
+            fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
+            opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
+            w1, l1 = _dots_to_wl(fav_series, 5)
+            w2, l2 = _dots_to_wl(opp_series, 5)
+            p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
+            p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
+            if p1 is not None and p2 is not None and (p1 + p2) > 0:
+                mbt = p1 / (p1 + p2)
+        except Exception:
+            pass
+
+        parts = []
+        def push(val, w):
+            if isinstance(val, (int, float)) and 0 <= val <= 1:
+                parts.append((val, w))
+        # Base weights; renormalize by available parts
+        push(base3, 0.20)
+        push(form3, 0.20)
+        push(logit3, 0.15)
+        push(mbt,   0.30)
+        if not parts:
+            return None
+        wsum = sum(w for _, w in parts) or 1.0
+        fci = sum(v * (w/wsum) for v, w in parts)
+        fci = max(0.0, min(1.0, fci))
+        name = fav_name or (compare.get('favName') if isinstance(compare.get('favName'), str) else None)
+        if name:
+            return f"{name} — FCI: {fci*100:.1f}%"
+        return f"FCI: {fci*100:.1f}%"
+    except Exception:
+        return None
 
 def _compute_markov_bt_line(compare: Optional[dict]) -> Optional[str]:
     """Return single-line summary: 'Марков–BT XX% и Топ-счёт: S',

@@ -272,12 +272,19 @@ function renderFavOppCompare(payload) {
     } catch(_) { return null; }
   })();
 
+  // Compute simple FCI text if provided in payload
+  const fciRow = (typeof payload?.fciFavPct === 'number') ? `
+      <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;font-weight:700;">${payload?.favName || 'Фаворит'} — FCI: ${Math.round(payload.fciFavPct)}%</div>
+      </div>` : '';
+
   return `
     <div class="min2-compare" style="margin-top:8px;background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
       <div class="cmp-head" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #eee;background:#f7f7f7;">
         <div style="padding:8px 10px;font-weight:600;">${favHdr}</div>
         <div style="padding:8px 10px;font-weight:600;border-left:1px solid #eee;">${oppHdr}</div>
       </div>
+      ${fciRow}
       <div class="cmp-row nb3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
         <div class="fav nb3" style="padding:8px 10px;">${favNb}</div>
         <div class="opp nb3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppNb}</div>
@@ -682,6 +689,7 @@ function renderFavOppCompare(payload) {
     try { autoInsertDecisionOnMatchPage(); } catch {}
     // Keep targeted insertion for specific stats page demo (no-op if not applicable)
     try { autoInsertForTSProStats(); } catch {}
+    try { ensureFCIInline(); } catch {}
     // After insertion, update any existing min2 blocks on the page (ids may vary)
     try { updateAllMin2Extracts(); } catch {}
   };
@@ -710,6 +718,14 @@ function renderFavOppCompare(payload) {
     if (containerAppeared) {
       try { autoInsertDecisionOnMatchPage(); } catch {}
       try { updateAllMin2Extracts(); } catch {}
+      try { ensureFCIInline(); } catch {}
+    }
+    // If the favImproved block appears later, inject FCI above it
+    const favBlockAppeared = mut.some((m) =>
+      Array.from(m.addedNodes || []).some((n) => n.nodeType === 1 && (n.matches?.('#favImproved') || n.querySelector?.('#favImproved')))
+    );
+    if (favBlockAppeared) {
+      try { ensureFCIInline(); } catch {}
     }
   });
 
@@ -1035,6 +1051,28 @@ function renderFavOppCompare(payload) {
       h2hWinsOpp: favIsA ? (Number(data?.h2h?.summary?.B?.wins)||0) : (Number(data?.h2h?.summary?.A?.wins)||0),
       h2hTotal: Number(data?.h2h?.summary?.A?.total||0)
     };
+    // Compute FCI for favorite and pass into compare payload for inline rendering
+    let FCI = computeFCI(data, {
+      favIsA,
+      base3: favIsA ? a3 : b3,
+      idxFav3: fav10.p3,
+      mlFav3: (function(){ const v = favIsA ? pA3_win : pB3_win; return Number.isFinite(v)? v : undefined; })(),
+      d5_10: fav10.d5_10,
+      d3_5: fav10.d3_5,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+    });
+    if (!FCI) {
+      const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+      const base3p = pctTo01(favIsA ? a3 : b3);
+      const logit3p = (function(){ const v = favIsA ? pA3_win : pB3_win; return pctTo01(v); })();
+      const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
+      FCI = { FCI: proxy, verdict: '', color: '#111827' };
+    }
+    const cmpPayload_dec = {
+      ...cmpPayload_dec,
+      fciFavPct: Math.round((FCI.FCI||0)*100)
+    };
     const htmlCmp = renderFavOppCompare(cmpPayload_dec);
 
     const containerId = 'tsx-auto-summaries';
@@ -1050,7 +1088,84 @@ function renderFavOppCompare(payload) {
         document.body.insertBefore(holder, document.body.firstChild);
       }
     }
-    holder.innerHTML = htmlTop + htmlCmp;
+    // Compute FCI block
+    const computeFCI = (data, ctx) => {
+      try {
+        const to01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x)) : null);
+        const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+        const base3 = pctTo01(ctx.base3);
+        const form3 = pctTo01(ctx.idxFav3);
+        const logit3 = pctTo01(ctx.mlFav3);
+        const arr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null).slice(0,5);
+        const f5 = arr(ctx.visFavTokens);
+        const o5 = arr(ctx.visOppTokens);
+        const p1 = f5.length? f5.reduce((a,b)=>a+b,0)/f5.length : null;
+        const p2 = o5.length? o5.reduce((a,b)=>a+b,0)/o5.length : null;
+        const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
+        const pA_fore = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+        const pB_fore = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+        const committee = to01(ctx.favIsA ? pA_fore : (pB_fore!=null? (1-pB_fore) : null));
+        const stability = (function(){
+          const sA = typeof data?.playerA?.stability==='number' ? data.playerA.stability : null;
+          const sB = typeof data?.playerB?.stability==='number' ? data.playerB.stability : null;
+          return ctx.favIsA ? sA : sB;
+        })();
+        const parts = [];
+        const push = (v,w)=>{ if (v!=null && isFinite(v)) parts.push([v,w]); };
+        push(base3, 0.20); push(form3, 0.20); push(logit3, 0.15); push(mbt, 0.30); push(committee, 0.10); push(stability, 0.05);
+        if (parts.length === 0) return null;
+        let wsum = parts.reduce((s,[_v,w])=>s+w,0) || 1;
+        let FCI = parts.reduce((s,[v,w])=> s + v*(w/wsum), 0);
+        const d5_10 = (typeof ctx.d5_10==='number') ? ctx.d5_10/100 : null;
+        const d3_5  = (typeof ctx.d3_5 ==='number') ? ctx.d3_5 /100 : null;
+        if (d5_10!=null && d5_10 < -0.05) FCI -= 0.05;
+        if (logit3!=null && logit3 < 0.5) FCI -= 0.07;
+        if (d3_5!=null && d3_5 > 0) FCI += 0.02;
+        const Kstab = (typeof stability==='number' && (stability*100) < 80) ? 0.95 : 1.00;
+        FCI = Math.max(0, Math.min(1, FCI * Kstab));
+        let verdict = 'Равные шансы'; let color='#9ca3af';
+        if (FCI >= 0.75){ verdict='Сильный фаворит'; color='#16a34a'; }
+        else if (FCI >= 0.60){ verdict='Умеренный фаворит'; color='#f59e0b'; }
+        else if (FCI >= 0.50){ verdict='Равные шансы'; color='#9ca3af'; }
+        else if (FCI >= 0.35){ verdict='Рискованный аутсайдер'; color='#f97316'; }
+        else { verdict='Слабый игрок'; color='#ef4444'; }
+        return { FCI, verdict, color };
+      } catch(_) { return null; }
+    };
+    const fciCtx = {
+      favIsA,
+      base3: favIsA ? a3 : b3,
+      idxFav3: fav10.p3,
+      mlFav3: (function(){ const v = favIsA ? pA3_win : pB3_win; return Number.isFinite(v)? v : undefined; })(),
+      d5_10: fav10.d5_10,
+      d3_5: fav10.d3_5,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+    };
+    let FCI = computeFCI(data, fciCtx);
+    if (!FCI) {
+      // Fallback to a simple proxy if some sources unavailable
+      const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+      const base3p = pctTo01(favIsA ? a3 : b3);
+      const logit3p = (function(){ const v = favIsA ? pA3_win : pB3_win; return pctTo01(v); })();
+      const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
+      const p = Math.max(0,Math.min(1, proxy));
+      let verdict='Равные шансы', color='#9ca3af';
+      if (p>=0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
+      else if (p>=0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
+      else if (p>=0.55){ verdict='50/50'; color='#9ca3af'; }
+      else if (p>=0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
+      else { verdict='Слабый игрок'; color='#ef4444'; }
+      FCI = { FCI: p, verdict, color };
+    }
+    try { console.info('[AUTO] FCI(main):', FCI); } catch(_) {}
+    const htmlFCI = (FCI ? `
+      <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;font-weight:700;color:${FCI.color};">FCI: ${(FCI.FCI*100).toFixed(1)}%</div>
+      </div>
+    ` : '');
+
+    holder.innerHTML = htmlTop + htmlCmp + htmlFCI;
     // After initial render, try to update H2H dots strictly from H2H once data arrives
     try {
       const makeDots = (tokensStr) => {
@@ -1294,7 +1409,96 @@ function renderFavOppCompare(payload) {
       last10Tokens: favH2H10_t.length > 0 ? tokens_t.join(' ') : null
     };
     const htmlCmp_ins2 = renderFavOppCompare(cmpPayload_ins2);
-    holder.innerHTML = htmlTop + htmlCmp_ins2;
+
+    // FCI v2.0 block for this insertion path
+    const computeFCI_local = (data, ctx) => {
+      try {
+        const to01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x)) : null);
+        const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+        const base3 = pctTo01(ctx.base3);
+        const form3 = pctTo01(ctx.idxFav3);
+        const logit3 = pctTo01(ctx.mlFav3);
+        const arr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null).slice(0,5);
+        const f5 = arr(ctx.visFavTokens);
+        const o5 = arr(ctx.visOppTokens);
+        const p1 = f5.length? f5.reduce((a,b)=>a+b,0)/f5.length : null;
+        const p2 = o5.length? o5.reduce((a,b)=>a+b,0)/o5.length : null;
+        const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
+        const pA_fore = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+        const pB_fore = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+        const committee = to01(ctx.favIsA ? pA_fore : (pB_fore!=null? (1-pB_fore) : null));
+        const stability = (function(){
+          const sA = typeof data?.playerA?.stability==='number' ? data.playerA.stability : null;
+          const sB = typeof data?.playerB?.stability==='number' ? data.playerB.stability : null;
+          return ctx.favIsA ? sA : sB;
+        })();
+        // base weights
+        let w = { base:0.20, form:0.20, logit:0.15, mbt:0.30, committee:0.10, stab:0.05 };
+        // adaptations
+        if (typeof ctx.d5_10==='number' && ctx.d5_10 < -5) w.base = 0.15;
+        if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
+        if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
+        if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
+        // compose (renormalize available)
+        const parts = [];
+        const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
+        push(base3, w.base); push(form3, w.form); push(logit3, w.logit); push(mbt, w.mbt); push(committee, w.committee); push(stability, w.stab);
+        let wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
+        let FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
+        // bonuses/penalties
+        let bonus = 0;
+        const d5_10p = (typeof ctx.d5_10==='number') ? ctx.d5_10/100 : null;
+        const d3_5p  = (typeof ctx.d3_5 ==='number') ? ctx.d3_5 /100 : null;
+        if (d3_5p!=null && d3_5p > 0) bonus += 0.02;
+        if (d3_5p!=null && d3_5p < -0.05) bonus -= 0.03;
+        if (d5_10p!=null && d5_10p < -0.05) bonus -= 0.05;
+        const stabPct = (function(){ const s = stability; return (typeof s==='number') ? (s*100) : null; })();
+        if (stabPct!=null && stabPct >= 90) bonus += 0.01;
+        if (stabPct!=null && stabPct < 80) bonus -= 0.02;
+        FCI = Math.max(0, Math.min(1, FCI + bonus));
+        let verdict = 'Равные шансы'; let color='#9ca3af';
+        if (FCI >= 0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
+        else if (FCI >= 0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
+        else if (FCI >= 0.55){ verdict='50/50'; color='#9ca3af'; }
+        else if (FCI >= 0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
+        else { verdict='Слабый игрок'; color='#ef4444'; }
+        return { FCI, verdict, color };
+      } catch(_) { return null; }
+    };
+
+    const fciCtx2 = {
+      favIsA,
+      base3: favIsA ? a3 : b3,
+      idxFav3: fav10.p3,
+      mlFav3: (function(){ const v = favIsA ? pA3_win : pB3_win; return Number.isFinite(v)? v : undefined; })(),
+      d5_10: fav10.d5_10,
+      d3_5: fav10.d3_5,
+      visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+    };
+    let FCI2 = computeFCI_local(data, fciCtx2);
+    if (!FCI2) {
+      const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+      const base3p = pctTo01(favIsA ? a3 : b3);
+      const logit3p = (function(){ const v = favIsA ? pA3_win : pB3_win; return pctTo01(v); })();
+      const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
+      const p = Math.max(0,Math.min(1, proxy));
+      let verdict='Равные шансы', color='#9ca3af';
+      if (p>=0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
+      else if (p>=0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
+      else if (p>=0.55){ verdict='50/50'; color='#9ca3af'; }
+      else if (p>=0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
+      else { verdict='Слабый игрок'; color='#ef4444'; }
+      FCI2 = { FCI: p, verdict, color };
+    }
+    try { console.info('[AUTO] FCI(insert):', FCI2); } catch(_) {}
+    const htmlFCI2 = (FCI2 ? `
+      <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;font-weight:700;color:${FCI2.color};">FCI: ${(FCI2.FCI*100).toFixed(1)}%</div>
+      </div>
+    ` : '');
+
+    holder.innerHTML = htmlTop + htmlCmp_ins2 + htmlFCI2;
 
     // Prefer to place above the overall score/header block if present
     const topHeader = document.querySelector('.table-top');
@@ -1354,6 +1558,112 @@ function renderFavOppCompare(payload) {
     });
   } catch {}
 })();
+
+// --- Ensure inline FCI appears right before <pre id="favImproved"> ---
+function ensureFCIInline() {
+  try {
+    const anchor = document.getElementById('favImproved');
+    if (!anchor) return;
+    if (document.getElementById('tsx-fci-inline')) return; // already inserted
+
+    // Retry helper: some data arrives later; try a few times
+    const scheduleRetry = () => {
+      try {
+        window.__fciInlineTries = (window.__fciInlineTries||0) + 1;
+        if (window.__fciInlineTries <= 12) setTimeout(ensureFCIInline, 400);
+      } catch(_) {}
+    };
+
+    // Build data
+    let data = null;
+    try { data = buildAnalyzeData({}); } catch(_) { scheduleRetry(); return; }
+    if (!data || !data.playerA || !data.playerB) { scheduleRetry(); return; }
+    const a10 = Number(data.playerA.nonBTProbability10 ?? data.playerA.nonBTProbability);
+    const b10 = Number(data.playerB.nonBTProbability10 ?? data.playerB.nonBTProbability);
+    // Determine favorite orientation: prefer p10; fallback to compare-block header
+    let favIsA = true;
+    if (Number.isFinite(a10) && Number.isFinite(b10)) {
+      favIsA = a10 >= b10;
+    } else {
+      try {
+        const head = document.querySelector('.min2-compare .cmp-head');
+        if (head) favIsA = true; // left column is favorite in our compare block
+      } catch(_) { /* keep default */ }
+    }
+    const a3  = Number(data.playerA.nonBTProbability3);
+    const b3  = Number(data.playerB.nonBTProbability3);
+    const fav10 = favIsA ? { p3: Number(data.playerA.nonBTProbability3), d5_10: (Number(data.playerA.nonBTProbability5)-Number(data.playerA.nonBTProbability10)), d3_5: (Number(data.playerA.nonBTProbability3)-Number(data.playerA.nonBTProbability5)) }
+                         : { p3: Number(data.playerB.nonBTProbability3), d5_10: (Number(data.playerB.nonBTProbability5)-Number(data.playerB.nonBTProbability10)), d3_5: (Number(data.playerB.nonBTProbability3)-Number(data.playerB.nonBTProbability5)) };
+    const p3b = computeModelP3(data);
+    const pA3_win = Number.isFinite(p3b.pA) ? (p3b.pA*100) : undefined;
+    const pB3_win = Number.isFinite(p3b.pB) ? (p3b.pB*100) : undefined;
+
+    // Compute FCI (fallback-safe)
+    const pct01 = (x)=> (typeof x==='number' && isFinite(x) ? Math.max(0,Math.min(1,x/100)) : null);
+    const base3 = pct01(favIsA ? a3 : b3);
+    const form3 = pct01(fav10.p3);
+    const logit3 = pct01(favIsA ? pA3_win : pB3_win);
+    // MBT from last-5 visualization tokens
+    const toArr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null).slice(0,5);
+    const f5 = toArr(String(data?.playerA?.visualization||''));
+    const o5 = toArr(String(data?.playerB?.visualization||''));
+    const p1 = f5.length? f5.reduce((a,b)=>a+b,0)/f5.length : null;
+    const p2 = o5.length? o5.reduce((a,b)=>a+b,0)/o5.length : null;
+    const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
+    // Committee probability (calibrated forecast/pred)
+    const pA_fore = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+    const pB_fore = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+    const committee = (favIsA ? pA_fore : (pB_fore!=null? (1-pB_fore) : null));
+    // Stability (0..1) for favorite
+    const stability = favIsA ? (typeof data?.playerA?.stability==='number'? data.playerA.stability : null)
+                             : (typeof data?.playerB?.stability==='number'? data.playerB.stability : null);
+    // Weights (adaptive lite, with renorm)
+    let w = { base:0.20, form:0.20, logit:0.15, mbt:0.30, committee:0.10, stab:0.05 };
+    if (typeof fav10.d5_10==='number' && fav10.d5_10 < -5) w.base = 0.15;
+    if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
+    if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
+    if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
+    const parts = [];
+    const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
+    push(base3, w.base); push(form3, w.form); push(logit3, w.logit); push(mbt, w.mbt); push(committee, w.committee); push(stability, w.stab);
+    if (!parts.length) {
+      // As a last resort, render a placeholder and schedule another attempt
+      const node = document.createElement('div');
+      node.id = 'tsx-fci-inline';
+      node.className = 'cmp-row fci';
+      node.setAttribute('style', 'display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin-bottom:6px;');
+      node.innerHTML = `<div style="padding:8px 10px;font-weight:700;color:#9ca3af;">FCI: —</div>`;
+      anchor.parentNode.insertBefore(node, anchor);
+      scheduleRetry();
+      return;
+    }
+    const wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
+    let FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
+    // Bonuses/penalties
+    const d5_10p = (typeof fav10.d5_10==='number') ? fav10.d5_10/100 : null;
+    const d3_5p  = (typeof fav10.d3_5 ==='number') ? fav10.d3_5 /100 : null;
+    if (d3_5p!=null && d3_5p > 0) FCI += 0.02;
+    if (d3_5p!=null && d3_5p < -0.05) FCI -= 0.03;
+    if (d5_10p!=null && d5_10p < -0.05) FCI -= 0.05;
+    const stabPct = (typeof stability==='number') ? (stability*100) : null;
+    if (stabPct!=null && stabPct >= 90) FCI += 0.01;
+    if (stabPct!=null && stabPct < 80) FCI -= 0.02;
+    FCI = Math.max(0, Math.min(1, FCI));
+    let verdict='Равные шансы', color='#9ca3af';
+    if (FCI >= 0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
+    else if (FCI >= 0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
+    else if (FCI >= 0.55){ verdict='50/50'; color='#9ca3af'; }
+    else if (FCI >= 0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
+    else { verdict='Слабый игрок'; color='#ef4444'; }
+
+    const node = document.createElement('div');
+    node.id = 'tsx-fci-inline';
+    node.className = 'cmp-row fci';
+    node.setAttribute('style', 'display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin-bottom:6px;');
+    node.innerHTML = `<div style="padding:8px 10px;font-weight:700;color:${color};">FCI: ${(FCI*100).toFixed(1)}%</div>`;
+    anchor.parentNode.insertBefore(node, anchor);
+  } catch(_) {}
+}
 
 // -------------- Pattern analysis --------------
 function computePatterns(recentsSections, h2hBlocks) {

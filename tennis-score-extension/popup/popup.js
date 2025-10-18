@@ -724,8 +724,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // skip render if invalid
       } else {
         const Pml_pct = Math.min(90, Math.round(P_ml_final * 100));
-        // Убираем упоминание TB3.5 из минимального заголовка по запросу
-        titleEl.textContent = `Fav ${favRenderName} ${Pml_pct}%`;
+        // Заголовок: Имя — FCI (используем калиброванную вероятность как fallback FCI)
+        titleEl.textContent = `${favRenderName} — FCI: ${Pml_pct}%`;
         // ---- Improved favorite block (compact 3-line info) ----
         try {
           // P_base from Non-BT mixture (no H2H), already computed via logit_base_nb
@@ -738,12 +738,78 @@ document.addEventListener('DOMContentLoaded', () => {
           else if (P_committee_pct >= 75 && conflict_pp >= 10) { risk='умеренный риск'; emoji='🟡'; }
           else if (P_committee_pct <= 60 && P_committee_pct >= 50) { risk='неопределённость'; emoji='⚪️'; }
           else if (P_committee_pct < 50) { risk='аутсайдер'; emoji='⚫️'; }
-          const favBlk = [
-            `🎯 Фаворит: ${favRenderName}`,
-            `Базовая оценка модели: ${P_base_pct.toFixed(1)}%`
-          ].join('\n');
+          // Убираем старый двухстрочный блок
           const favImp = document.getElementById('favImproved');
-          if (favImp) { favImp.textContent = favBlk; }
+          if (favImp) { favImp.textContent = ''; }
+
+          // --- Inline FCI right above favImproved + replace header with Name + FCI ---
+          try {
+            const anchor = document.getElementById('favImproved');
+            if (anchor) {
+              // Components for FCI v2.0 (fallback-friendly)
+              const to01 = (x)=> (typeof x==='number' && isFinite(x) ? Math.max(0,Math.min(1,x)) : null);
+              const pct01 = (x)=> (typeof x==='number' && isFinite(x) ? Math.max(0,Math.min(1,x/100)) : null);
+              const base3 = pct01(fav.p3);
+              const form3 = pct01(fav.p3); // proxy for index P3 if not available
+              const logit3 = to01(favMl3);
+              // MBT (last-5 wins rate relative to favorite)
+              const lastWins = (rec, n=5)=>{ let w=0,t=0; (rec||[]).slice(0,n).forEach(m=>{ const fo=m?.finalScoreOwnOpponent||{}; const a=+fo.own||0, b=+fo.opponent||0; if(a||b||a===0||b===0){ t++; if(a>b) w++; } }); return t? (w/t) : null; };
+              const favRec = favIsA ? recA10 : recB10;
+              const oppRec = favIsA ? recB10 : recA10;
+              const p1 = lastWins(favRec,5); const p2 = lastWins(oppRec,5);
+              const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
+              // Committee probability (calibrated forecast/pred)
+              const pA_fore = (typeof d?.forecast?.pA === 'number') ? d.forecast.pA : (typeof d?.predWinProbA==='number'? d.predWinProbA/100 : null);
+              const pB_fore = (typeof d?.forecast?.pB === 'number') ? d.forecast.pB : (typeof d?.predWinProbB==='number'? d.predWinProbB/100 : null);
+              const committee = favIsA ? to01(pA_fore) : (pB_fore!=null? to01(1-pB_fore) : null);
+              const stability = favIsA ? to01(d?.playerA?.stability) : to01(d?.playerB?.stability);
+              // Adaptive weights
+              let w = { base:0.20, form:0.20, logit:0.15, mbt:0.30, committee:0.10, stab:0.05 };
+              if (Number.isFinite(fav.d5_10) && fav.d5_10 < -5) w.base = 0.15;
+              if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
+              if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
+              if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
+              const parts = [];
+              const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
+              push(base3,w.base); push(form3,w.form); push(logit3,w.logit); push(mbt,w.mbt); push(committee,w.committee); push(stability,w.stab);
+              let FCI = null;
+              if (parts.length){
+                const wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
+                FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
+                // Bonuses/penalties
+                const d5_10p = Number.isFinite(fav.d5_10)? fav.d5_10/100 : null;
+                const d3_5p  = Number.isFinite(fav.d3_5)?  fav.d3_5 /100 : null;
+                if (d3_5p!=null && d3_5p > 0) FCI += 0.02;
+                if (d3_5p!=null && d3_5p < -0.05) FCI -= 0.03;
+                if (d5_10p!=null && d5_10p < -0.05) FCI -= 0.05;
+                const stabPct = (typeof stability==='number') ? (stability*100) : null;
+                if (stabPct!=null && stabPct >= 90) FCI += 0.01;
+                if (stabPct!=null && stabPct < 80) FCI -= 0.02;
+                FCI = Math.max(0, Math.min(1, FCI));
+              }
+              const val = (typeof FCI==='number') ? (FCI*100).toFixed(1)+'%' : '—';
+              if (!document.getElementById('tsx-fci-inline')) {
+                const node = document.createElement('div');
+                node.id = 'tsx-fci-inline';
+                node.className = 'cmp-row fci';
+                node.setAttribute('style', 'display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin:6px 0;');
+                node.textContent = `FCI: ${val}`;
+                anchor.parentNode.insertBefore(node, anchor);
+              } else {
+                try { document.getElementById('tsx-fci-inline').textContent = `FCI: ${val}`; } catch(_) {}
+              }
+
+              // Replace header and favImproved block contents at the end of the tick
+              setTimeout(() => {
+                try {
+                  const titleEl = document.getElementById('mfTitle');
+                  if (titleEl) titleEl.textContent = `${favRenderName} — FCI: ${val}`;
+                  const favImp2 = document.getElementById('favImproved');
+                  if (favImp2) favImp2.textContent = '';
+                } catch(_) {}
+              }, 0);
+            }
+          } catch(_) {}
         } catch(_) {}
       }
       const tbLine = document.getElementById('mfTB');
