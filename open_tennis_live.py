@@ -242,12 +242,20 @@ def _init_output_files():
       nb3_fav_noH2H, nb3_fav_H2H, nb3_opp_noH2H, nb3_opp_H2H,
       last10_fav, last10_opp, h2h_total, league, url
     """
-    paths = [
-        (OUTPUT_LIVE_CSV, "matches_3of3.csv"),
-        (OUTPUT_LIVE_CSV_COMPAT, "live_3of3.csv"),
-        (PROCESSED_LIVE_JSON, "processed_live_urls.json"),
-    ]
-    for path, label in paths:
+    keep_csv = bool(os.getenv("AUTOBET_KEEP_CSV"))
+    keep_processed = bool(os.getenv("AUTOBET_KEEP_PROCESSED"))
+
+    # Удаляем выходные файлы, если не включён режим сохранения
+    to_remove = []
+    if not keep_csv:
+        to_remove.extend([
+            (OUTPUT_LIVE_CSV, "matches_3of3.csv"),
+            (OUTPUT_LIVE_CSV_COMPAT, "live_3of3.csv"),
+        ])
+    if not keep_processed:
+        to_remove.append((PROCESSED_LIVE_JSON, "processed_live_urls.json"))
+
+    for path, label in to_remove:
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -256,26 +264,28 @@ def _init_output_files():
             print(f"[init] warn: cannot remove {label} at {path}: {e}")
     # create empty CSV with header
     try:
-        with open(OUTPUT_LIVE_CSV, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([
-                "time", "favorite", "opponent",
-                "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                "last10_fav", "last10_opp", "h2h_total", "league", "url"
-            ])
-        print(f"[init] created header at {OUTPUT_LIVE_CSV}")
+        if not os.path.exists(OUTPUT_LIVE_CSV):
+            with open(OUTPUT_LIVE_CSV, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    "time", "favorite", "opponent",
+                    "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                    "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                    "last10_fav", "last10_opp", "h2h_total", "league", "url"
+                ])
+            print(f"[init] created header at {OUTPUT_LIVE_CSV}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV}: {e}")
     # инициализируем файл совместимости тем же заголовком
     try:
-        with open(OUTPUT_LIVE_CSV_COMPAT, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow([
-                "time", "favorite", "opponent",
-                "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                "last10_fav", "last10_opp", "h2h_total", "league", "url"
-            ])
-        print(f"[init] created header at {OUTPUT_LIVE_CSV_COMPAT}")
+        if not os.path.exists(OUTPUT_LIVE_CSV_COMPAT):
+            with open(OUTPUT_LIVE_CSV_COMPAT, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    "time", "favorite", "opponent",
+                    "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
+                    "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
+                    "last10_fav", "last10_opp", "h2h_total", "league", "url"
+                ])
+            print(f"[init] created header at {OUTPUT_LIVE_CSV_COMPAT}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV_COMPAT}: {e}")
 
