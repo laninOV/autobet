@@ -243,6 +243,35 @@ function renderFavOppCompare(payload) {
   const visFavHtml = visFavTokens ? formatDots(visFavTokens) : '';
   const visOppHtml = visOppTokens ? formatDots(visOppTokens) : '';
 
+  // --- Markov–Bradley–Terry (independent method) ---
+  const mbt = (() => {
+    try {
+      // Формируем вероятность только по форме (последние 5 игр каждого)
+      const toArr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null);
+      const arrFav = toArr(visFavTokens).slice(0,5);
+      const arrOpp = toArr(visOppTokens).slice(0,5);
+      const p_f1 = arrFav.length ? (arrFav.reduce((a,b)=>a+b,0)/arrFav.length) : null;
+      const p_f2 = arrOpp.length ? (arrOpp.reduce((a,b)=>a+b,0)/arrOpp.length) : null;
+      const p_form_rel = (p_f1!=null && p_f2!=null && (p_f1+p_f2)>0) ? (p_f1/(p_f1+p_f2)) : null;
+      let p = p_form_rel;
+      if(p==null) return null;
+      p = Math.max(0.01, Math.min(0.99, p));
+      const q = 1-p;
+      const p30 = p**3;
+      const p31 = 3*p**3*q;
+      const p32 = 6*p**3*q**2;
+      const p03 = q**3;
+      const p13 = 3*q**3*p;
+      const p23 = 6*q**3*p**2;
+      const PA = p30+p31+p32; const PB = p03+p13+p23;
+      const norm = (PA+PB)>0 ? (PA/(PA+PB)) : p;
+      const map = { '3:0':p30,'3:1':p31,'3:2':p32,'0:3':p03,'1:3':p13,'2:3':p23 };
+      const best = Object.entries(map).sort((a,b)=>b[1]-a[1])[0][0];
+      const p45 = p31+p13+p32+p23;
+      return { pFav:norm, pOpp:1-norm, bestScore:best, p45 };
+    } catch(_) { return null; }
+  })();
+
   return `
     <div class="min2-compare" style="margin-top:8px;background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
       <div class="cmp-head" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #eee;background:#f7f7f7;">
@@ -274,6 +303,10 @@ function renderFavOppCompare(payload) {
       <div class="cmp-row last10" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
         <div class="fav last10" style="padding:8px 10px; grid-column: 1 / span 2;">${last10Html}</div>
       </div>`}
+      ${mbt ? `
+      <div class="cmp-row mbt" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;font-weight:600;color:#111827;">Марков–BT ${Math.round(mbt.pFav*100)}% и Топ-счёт: ${mbt.bestScore}</div>
+      </div>` : ''}
     </div>
   `;
 }
@@ -996,7 +1029,11 @@ function renderFavOppCompare(payload) {
       last10Avail: Number(data?.h2h?.total) > 0,
       last10Tokens: tokens_dec || null,
       visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
-      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      // H2H wins summary for Markov–BT block (oriented relative to favorite)
+      h2hWinsFav: favIsA ? (Number(data?.h2h?.summary?.A?.wins)||0) : (Number(data?.h2h?.summary?.B?.wins)||0),
+      h2hWinsOpp: favIsA ? (Number(data?.h2h?.summary?.B?.wins)||0) : (Number(data?.h2h?.summary?.A?.wins)||0),
+      h2hTotal: Number(data?.h2h?.summary?.A?.total||0)
     };
     const htmlCmp = renderFavOppCompare(cmpPayload_dec);
 

@@ -1825,15 +1825,9 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
             else:
                 w += 1
         return w
-    # Color mark for logistic (📊): <52 red, >52 green, =52 neutral
+    # Keep ML marker out of table cells for alignment stability
     def mark(v):
-        try:
-            f = float(v)
-            if f > 52: return '🟩'  # green square
-            if f < 52: return '🟥'  # red square
-            return ''
-        except Exception:
-            return ''
+        return ''
     # Prepare raw value strings
     val_d_f = s(d_f)
     val_d_o = s(d_o)
@@ -1844,9 +1838,9 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
     val_ml_f = pct0(ml_f)
     val_ml_o = pct0(ml_o)
     mlf = mark(ml_f); mlo = mark(ml_o)
-    # Left side: marker before value; Right side: value before marker
-    val_ml_f_col = (f"{mlf} {val_ml_f}" if mlf else val_ml_f)
-    val_ml_o_col = (f"{val_ml_o} {mlo}" if mlo else val_ml_o)
+    # Use numeric-only cells
+    val_ml_f_col = val_ml_f
+    val_ml_o_col = val_ml_o
     val_idx_f = pct0(idx_f)
     val_idx_o = pct0(idx_o)
     # Last 10 games dots per player from compare.viz10 if available (fallback to last10/H2H visualization)
@@ -1922,7 +1916,19 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
                 parts.append(esc(f"🚩 {lo}"))
     except Exception:
         pass
-    parts.append(f"<pre>{esc(pre_block)}</pre>")
+    # Replace <pre> block with per-line inline code cells to avoid Telegram 'копировать' header and emoji width issues
+    def pad_fixed(text, width):
+        t = '' if text is None else str(text)
+        if len(t) < width:
+            t = t + ' ' * (width - len(t))
+        return t
+    def line(icon, lv, rv, w_left, w_right):
+        return f"{icon} <code>{esc(pad_fixed(lv, w_left))}</code> | <code>{esc(pad_fixed(rv, w_right))}</code>"
+    parts.append(line('📈', val_d_f,       val_d_o,       10, 10))
+    parts.append(line('👤', val_nb_no_f,   val_nb_no_o,    4,  4))
+    parts.append(line('👥', val_nb_h2_f,   val_nb_h2_o,    4,  4))
+    parts.append(line('📊', val_ml_f_col,  val_ml_o_col,   4,  4))
+    parts.append(line('💪', val_idx_f,     val_idx_o,      4,  4))
     # Restore H2H line relative to favorite
     try:
         if isinstance(compare, dict):
@@ -1938,7 +1944,129 @@ def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict]
         pass
     link = esc(_canonical_stats_url(url))
     parts.append(f"<a href=\"{link}\">Статистика</a>")
+
+    # Краткая строка: Марков–BT и Топ-счёт (по 5 играм, без H2H)
+    try:
+        mbt_line = _compute_markov_bt_line(compare)
+        if mbt_line:
+            parts.append(esc(mbt_line))
+    except Exception:
+        pass
+
     return "\n".join(parts)
+
+
+# ---------------------- Markov + Bradley–Terry block ----------------------
+def _dots_to_wl(s: Optional[str], limit: int = 5) -> Tuple[int, int]:
+    """Convert dots string like '🟢🔴…' to (wins, losses) for last `limit` items."""
+    if not s:
+        return 0, 0
+    arr = [ch for ch in str(s) if ch in ('🟢', '🔴')][:limit]
+    w = sum(1 for ch in arr if ch == '🟢')
+    l = sum(1 for ch in arr if ch == '🔴')
+    return w, l
+
+
+def _parse_score_lr(score: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not score or not isinstance(score, str):
+        return None, None
+    m = re.search(r"(\d{1,3})\s*[:\-–—]\s*(\d{1,3})", score)
+    if not m:
+        return None, None
+    try:
+        return int(m.group(1)), int(m.group(2))
+    except Exception:
+        return None, None
+
+
+def _combine_weighted(p_h2h: Optional[float], p_form_rel: Optional[float], p_bt: Optional[float], w=(0.4, 0.3, 0.3)) -> Optional[float]:
+    parts: list[float] = []
+    weights: list[float] = []
+    for v, ww in ((p_h2h, w[0]), (p_form_rel, w[1]), (p_bt, w[2])):
+        if v is None:
+            continue
+        parts.append(float(v))
+        weights.append(float(ww))
+    if not parts:
+        return None
+    ws = sum(weights)
+    if ws <= 0:
+        return sum(parts) / len(parts)
+    return sum(v * weights[i] for i, v in enumerate(parts)) / ws
+
+
+def _markov_best_of_5(p: float) -> dict:
+    q = 1.0 - p
+    p30 = p ** 3
+    p31 = 3 * (p ** 3) * q
+    p32 = 6 * (p ** 3) * (q ** 2)
+    p03 = q ** 3
+    p13 = 3 * (q ** 3) * p
+    p23 = 6 * (q ** 3) * (p ** 2)
+    pa = p30 + p31 + p32
+    pb = p03 + p13 + p23
+    return {'3:0': p30, '3:1': p31, '3:2': p32, '0:3': p03, '1:3': p13, '2:3': p23, 'P(A)': pa, 'P(B)': pb}
+
+
+def _compute_markov_bt_line(compare: Optional[dict]) -> Optional[str]:
+    """Return single-line summary: 'Марков–BT XX% и Топ-счёт: S',
+    using only last 5 games of each player (no H2H)."""
+    if not isinstance(compare, dict):
+        return None
+    fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
+    opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
+    w1, l1 = _dots_to_wl(fav_series, 5)
+    w2, l2 = _dots_to_wl(opp_series, 5)
+    p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
+    p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
+    if p1 is None or p2 is None or (p1 + p2) <= 0:
+        return None
+    p = p1 / (p1 + p2)
+    p = max(0.01, min(0.99, float(p)))
+    dist = _markov_best_of_5(p)
+    pa = dist['P(A)']; pb = dist['P(B)']
+    norm_p1 = pa / (pa + pb) if (pa + pb) > 0 else p
+    best_score, _ = max({k: v for k, v in dist.items() if ':' in k}.items(), key=lambda kv: kv[1])
+    return f"Марков–BT {int(round(norm_p1*100))}% и Топ-счёт: {best_score}"
+
+
+def _compute_markov_bt_block(compare: Optional[dict], fav: str, opp: str) -> Optional[str]:
+    """Markov–BT simplified: only last-5 games form for each player.
+    Ignores H2H entirely. Returns formatted text or None if not enough data."""
+    if not isinstance(compare, dict):
+        return None
+    # Prefer per-player own last results from viz10; fallback to last10
+    fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
+    opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
+
+    w1, l1 = _dots_to_wl(fav_series, 5)
+    w2, l2 = _dots_to_wl(opp_series, 5)
+    p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
+    p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
+    if p1 is None or p2 is None or (p1 + p2) <= 0:
+        return None
+    # Relative probability for favorite based only on last-5 win rates
+    p = p1 / (p1 + p2)
+    p = max(0.01, min(0.99, float(p)))
+    dist = _markov_best_of_5(p)
+    pa = dist['P(A)']; pb = dist['P(B)']
+    norm_p1 = pa / (pa + pb) if (pa + pb) > 0 else p
+    best_score, best_val = max({k: v for k, v in dist.items() if ':' in k}.items(), key=lambda kv: kv[1])
+    p45 = dist['3:1'] + dist['1:3'] + dist['3:2'] + dist['2:3']
+
+    def pct(x: float) -> str:
+        try:
+            return f"{x*100:.1f}%"
+        except Exception:
+            return "—"
+
+    lines = []
+    lines.append("📊 Метод Маркова–Брэдли–Терри (5 игр)")
+    lines.append(f"{fav} — {pct(norm_p1)}")
+    lines.append(f"{opp} — {pct(1.0 - norm_p1)}")
+    lines.append(f"Наиболее вероятный счёт: {best_score}")
+    lines.append(f"Вероятность 4–5 сетов: {pct(p45)}")
+    return "\n".join(lines)
 
 
 def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], output_csv: str,
