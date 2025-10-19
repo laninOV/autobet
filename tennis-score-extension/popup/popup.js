@@ -810,6 +810,30 @@ document.addEventListener('DOMContentLoaded', () => {
               }, 0);
             }
           } catch(_) {}
+
+          // --- Hybrid Markov (by points) inline row under FCI ---
+          try {
+            const hmId = 'tsx-hm-inline';
+            const host = document.getElementById('favImproved') || document.getElementById('mfCompare');
+            if (host && !document.getElementById(hmId)) {
+              const MS_DAY = 24*60*60*1000;
+              const countLast2Days = (arr)=>{ try{ const now=new Date().getTime(); const cutoff=now-2*MS_DAY; let c=0; (arr||[]).forEach(m=>{ const dStr=m?.date||''; const mm=(String(dStr).match(/(\d{1,2})[.\/-](\d{1,2})/)||[]); if(mm.length){ const dd=+mm[1], mo=+mm[2]-1; const dt=new Date(new Date().getFullYear(),mo,dd); if(!isNaN(dt.getTime()) && dt.getTime()>=cutoff) c++; } }); return c; }catch(_){ return 0; } };
+              const pickWin = (arr)=> (countLast2Days(arr)>=5? (arr||[]).slice(0,3) : (arr||[]).slice(0,5));
+              const diffs = (arr)=>{ const out=[]; (arr||[]).forEach(m=>{ const sets=Array.isArray(m.setsOwnOpponent)? m.setsOwnOpponent:[]; sets.forEach(([a,b])=>{ const aa=+a||0,bb=+b||0; out.push(aa-bb); }); }); return out; };
+              const pSet = (arr)=>{ const ds=diffs(arr); if(!ds.length) return 0.5; const ps=ds.map(d=>1/(1+Math.exp(-d/7))); return ps.reduce((s,v)=>s+v,0)/ps.length; };
+              const favRec = favIsA ? recA10 : recB10;
+              const oppRec = favIsA ? recB10 : recA10;
+              const p1=pSet(pickWin(favRec)), p2=pSet(pickWin(oppRec));
+              const p = (p1+p2)>0 ? (p1/(p1+p2)) : 0.5; const q=1-p;
+              const P30=p**3, P31=3*p**3*q, P32=6*p**3*q**2, P03=q**3, P13=3*q**3*p, P23=6*q**3*p**2;
+              const Pwin=P30+P31+P32, Plose=P03+P13+P23; const P2=Pwin+P23; const top=['3:1', '3:2', '3:0'][[P31,P32,P30].indexOf(Math.max(P31,P32,P30))];
+              const line=document.createElement('div');
+              line.id=hmId; line.className='cmp-row hm';
+              line.setAttribute('style','display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin:6px 0;');
+              line.textContent = `Марков (очки): ${(Math.round((Pwin/(Pwin+Plose))*100))}% • Топ-счёт: ${top} • ≥2 сетов: ${Math.round(P2*100)}%`;
+              host.parentNode.insertBefore(line, host);
+            }
+          } catch(_) {}
         } catch(_) {}
       }
       const tbLine = document.getElementById('mfTB');
@@ -3148,11 +3172,39 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
 
-  function setError(message) {
+  function setError(message, originForPerm) {
     loading.classList.add('hidden');
     if (error) {
       error.querySelector('p').textContent = message;
       error.classList.remove('hidden');
+      const btn = document.getElementById('grantPermBtn');
+      if (btn) {
+        if (originForPerm) {
+          btn.style.display = '';
+          btn.onclick = async () => {
+            try {
+              const ok = await new Promise((resolve) => {
+                if (!chrome.permissions || !chrome.permissions.request) return resolve(false);
+                chrome.permissions.request({ origins: [originForPerm] }, (gr) => resolve(!!gr));
+              });
+              if (ok) {
+                try {
+                  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (tabs && tabs[0]) chrome.tabs.reload(tabs[0].id);
+                  });
+                } catch(_) {}
+                setTimeout(() => launchAnalyze(), 800);
+              } else {
+                setError('Доступ не предоставлен. Включите расширение для этого сайта.');
+              }
+            } catch (e) {
+              setError('Ошибка запроса доступа: ' + (e?.message||e));
+            }
+          };
+        } else {
+          btn.style.display = 'none';
+        }
+      }
     }
   }
 
@@ -3170,14 +3222,38 @@ document.addEventListener('DOMContentLoaded', () => {
       // Отправляем запрос контент‑скрипту без жесткой проверки URL — сам контент вернёт ошибку, если не на нужной странице
       const tab = tabs[0];
 
-      chrome.tabs.sendMessage(tab.id, { action: 'analyze' }, (response) => {
+      chrome.tabs.sendMessage(tab.id, { action: 'analyze' }, async (response) => {
         loading.classList.add('hidden');
         
         // Улучшенная обработка ошибок соединения
         if (chrome.runtime.lastError) {
           const errorMsg = chrome.runtime.lastError.message;
           if (errorMsg.includes('Receiving end does not exist')) {
-            setError('Перезагрузите страницу и попробуйте снова');
+            try {
+              const url = new URL(tab.url || '');
+              const origin = url.origin + '/*';
+              // 1) Попробуем ввести контент-скрипт принудительно (без перезагрузки)
+              if (chrome.scripting && chrome.scripting.executeScript) {
+                try {
+                  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['lib/meta-calibration.js'] });
+                  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['lib/bt-mm.js'] });
+                  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['lib/bradley-terry.js'] });
+                  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/index.js'] });
+                  // Повторный запрос после инъекции
+                  setTimeout(() => launchAnalyze(), 200);
+                  return;
+                } catch (e) {
+                  // Если сайт запрещает инъекцию — попросим доступ явно
+                  setError('Для работы нужно разрешить доступ расширению на этом сайте.', origin);
+                  return;
+                }
+              } else {
+                setError('Для работы нужно разрешить доступ расширению на этом сайте.', origin);
+                return;
+              }
+            } catch(_) {
+              setError('Перезагрузите страницу и попробуйте снова');
+            }
           } else {
             setError('Ошибка соединения: ' + errorMsg);
           }

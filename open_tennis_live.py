@@ -476,6 +476,11 @@ def run(filters: List[str]) -> None:
                     except Exception:
                         pass
                 page.on("console", _console)
+                # Also surface page exceptions to the terminal for easier debugging
+                try:
+                    page.on("pageerror", lambda e: print(f"[pageerror] {e}"))
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1177,7 +1182,41 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                                 'ml3': { 'fav': None, 'opp': None },
                                 'idx3': { 'fav': None, 'opp': None },
                                 'd35': { 'fav': None, 'opp': None },
+                                'last10': { 'favDots': None, 'oppDots': None },
                             }
+                        # Fill compare from values we already parsed, if any
+                        try:
+                            # NB3
+                            if nb3_fav_no is not None or nb3_fav_h2 is not None:
+                                compare.setdefault('nb3', {}).setdefault('fav', {})
+                                if nb3_fav_no is not None:
+                                    compare['nb3']['fav']['noH2H'] = nb3_fav_no
+                                if nb3_fav_h2 is not None:
+                                    compare['nb3']['fav']['h2h'] = nb3_fav_h2
+                            if nb3_opp_no is not None or nb3_opp_h2 is not None:
+                                compare.setdefault('nb3', {}).setdefault('opp', {})
+                                if nb3_opp_no is not None:
+                                    compare['nb3']['opp']['noH2H'] = nb3_opp_no
+                                if nb3_opp_h2 is not None:
+                                    compare['nb3']['opp']['h2h'] = nb3_opp_h2
+                            # ML3 / IDX3 from fallback metrics (log3, idx3)
+                            try:
+                                no_bt_3, with_h2h_3, log3, idx3 = metrics
+                            except Exception:
+                                log3 = None; idx3 = None
+                            if isinstance(log3, (int, float)):
+                                compare.setdefault('ml3', {})['fav'] = log3
+                                compare['ml3']['opp'] = max(0, 100 - float(log3))
+                            if isinstance(idx3, (int, float)):
+                                compare.setdefault('idx3', {})['fav'] = idx3
+                                compare['idx3']['opp'] = max(0, 100 - float(idx3))
+                            # last10 dots if we already extracted
+                            if last10_fav:
+                                compare.setdefault('last10', {})['favDots'] = last10_fav
+                            if last10_opp:
+                                compare.setdefault('last10', {})['oppDots'] = last10_opp
+                        except Exception:
+                            pass
                         # Override names from compare header if present (cleaned)
                         try:
                             fn = _clean_name(compare.get('favName')) if isinstance(compare, dict) else None
@@ -1358,6 +1397,56 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
             # NB values не выводятся в блоке — оставляем None
             if log3 is not None or idx3 is not None:
                 return (None, None, log3, idx3)
+    except Exception:
+        pass
+
+    # 1b) Site-native fallback: parse "Вероятность (без BT)" table if present
+    try:
+        v = page.evaluate(
+            """
+            () => {
+              const txt = (sel) => { const el = document.querySelector(sel); return el ? (el.innerText||el.textContent||'') : ''; };
+              const parseRow = (idSel) => {
+                const root = document.querySelector(idSel);
+                const block = root ? root.closest('tr').querySelector('.nb-entry') : null;
+                const out = { no: { p10:null,p5:null,p3:null }, with: { p10:null,p5:null,p3:null }, name: '' };
+                try { out.name = txt(idSel).replace(/\(.*?\)/g,'').trim(); } catch(_){ out.name=''; }
+                if (block){
+                  const t = (block.innerText||block.textContent||'').replace(/\s+/g,' ');
+                  const mNo  = t.match(/без\s*H2H\s*10:\s*([\d.,]+)%\s*•\s*5:\s*([\d.,]+)%\s*•\s*3:\s*([\d.,]+)%/i);
+                  const mWith= t.match(/с\s*H2H\s*10:\s*([\d.,]+)%\s*•\s*5:\s*([\d.,]+)%\s*•\s*3:\s*([\d.,]+)%/i);
+                  const toNum = (s)=>{ if(!s)return null; const v=parseFloat(String(s).replace(',','.')); return isFinite(v)? v: null; };
+                  if (mNo){ out.no.p10=toNum(mNo[1]); out.no.p5=toNum(mNo[2]); out.no.p3=toNum(mNo[3]); }
+                  if (mWith){ out.with.p10=toNum(mWith[1]); out.with.p5=toNum(mWith[2]); out.with.p3=toNum(mWith[3]); }
+                }
+                return out;
+              };
+              return { A: parseRow('#probNoBtNameA'), B: parseRow('#probNoBtNameB') };
+            }
+            """
+        )
+        if isinstance(v, dict) and 'A' in v and 'B' in v:
+            def pick_p3(obj):
+                try:
+                    return float(obj.get('no',{}).get('p3')) if obj.get('no',{}).get('p3') is not None else (
+                           float(obj.get('with',{}).get('p3')) if obj.get('with',{}).get('p3') is not None else None)
+                except Exception:
+                    return None
+            A = v.get('A') or {}
+            B = v.get('B') or {}
+            # Decide orientation by matching names to fav/opp
+            def norm(s):
+                return re.sub(r"\s+", " ", str(s or '')).strip().lower()
+            na = norm(A.get('name'))
+            nb = norm(B.get('name'))
+            f = norm(fav)
+            o = norm(opp)
+            a_is_fav = (f and na and f in na) or (o and nb and o in nb and not (f and nb and f in nb))
+            fav_p3 = pick_p3(A if a_is_fav else B)
+            opp_p3 = pick_p3(B if a_is_fav else A)
+            if fav_p3 is not None or opp_p3 is not None:
+                # return as (noBT3_noH2H, noBT3_H2H, log3, idx3)
+                return (None, None, fav_p3, fav_p3)
     except Exception:
         pass
 

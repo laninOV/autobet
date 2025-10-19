@@ -1,3 +1,10 @@
+// Idempotent content script wrapper to avoid redeclarations on reinjection
+(function(){
+  if (typeof window !== 'undefined') {
+    if (window.__TSX_CONTENT_LOADED__) return; // already loaded
+    window.__TSX_CONTENT_LOADED__ = true;
+  }
+
 /*
 Вот улучшенный, чётко структурированный и выразительный вариант вывода — с акцентом на самые сильные показатели победителя и ясной иерархией значимости 👇
 
@@ -310,6 +317,10 @@ function renderFavOppCompare(payload) {
       <div class="cmp-row last10" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
         <div class="fav last10" style="padding:8px 10px; grid-column: 1 / span 2;">${last10Html}</div>
       </div>`}
+      ${ (typeof payload?.hmProb === 'number') ? `
+      <div class="cmp-row hm" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;">Марков (очки): ${Math.round(payload.hmProb)}% • Топ-счёт: ${payload?.hmTop || '—'} • ≥2 сетов: ${Math.round(payload?.hmP2sets||0)}%</div>
+      </div>` : ''}
       ${mbt ? `
       <div class="cmp-row mbt" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
         <div style="padding:8px 10px;font-weight:600;color:#111827;">Марков–BT ${Math.round(mbt.pFav*100)}% и Топ-счёт: ${mbt.bestScore}</div>
@@ -1029,6 +1040,9 @@ function renderFavOppCompare(payload) {
     const b3h_dec = Number(data?.playerB?.nonBTProbability3_h2h);
     const baseVis_dec = (data?.h2h && typeof data.h2h.visualization==='string') ? data.h2h.visualization : '';
     const tokens_dec = (favIsA ? baseVis_dec : baseVis_dec.replace(/🟢|🔴/g, m => (m==='🟢'?'🔴':'🟢'))).trim();
+    // Hybrid Markov by points from recent matches, oriented to favorite
+    const hmRes = computeHybridMarkov(favIsA ? recA10 : recB10, favIsA ? recB10 : recA10, 7) || null;
+
     const cmpPayload_dec = {
       favName: fav10.name,
       oppName: opp10.name,
@@ -1051,8 +1065,8 @@ function renderFavOppCompare(payload) {
       h2hWinsOpp: favIsA ? (Number(data?.h2h?.summary?.B?.wins)||0) : (Number(data?.h2h?.summary?.A?.wins)||0),
       h2hTotal: Number(data?.h2h?.summary?.A?.total||0)
     };
-    // Compute FCI for favorite and pass into compare payload for inline rendering
-    let FCI = computeFCI(data, {
+    // Compute FCI for favorite and pass into compare payload for inline rendering (inline block)
+    let FCI_ins = computeFCI(data, {
       favIsA,
       base3: favIsA ? a3 : b3,
       idxFav3: fav10.p3,
@@ -1062,18 +1076,21 @@ function renderFavOppCompare(payload) {
       visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
       visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
     });
-    if (!FCI) {
+    if (!FCI_ins) {
       const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
       const base3p = pctTo01(favIsA ? a3 : b3);
       const logit3p = (function(){ const v = favIsA ? pA3_win : pB3_win; return pctTo01(v); })();
       const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
-      FCI = { FCI: proxy, verdict: '', color: '#111827' };
+      FCI_ins = { FCI: proxy, verdict: '', color: '#111827' };
     }
-    const cmpPayload_dec = {
+    const cmpPayload_dec2 = {
       ...cmpPayload_dec,
-      fciFavPct: Math.round((FCI.FCI||0)*100)
+      fciFavPct: Math.round((FCI_ins.FCI||0)*100),
+      hmProb: hmRes ? Math.round((hmRes.p_match||0)*100) : undefined,
+      hmTop: hmRes ? (hmRes.topScore||undefined) : undefined,
+      hmP2sets: hmRes ? Math.round((hmRes.p_2sets||0)*100) : undefined
     };
-    const htmlCmp = renderFavOppCompare(cmpPayload_dec);
+    const htmlCmp = renderFavOppCompare(cmpPayload_dec2);
 
     const containerId = 'tsx-auto-summaries';
     let holder = document.getElementById(containerId);
@@ -1088,8 +1105,8 @@ function renderFavOppCompare(payload) {
         document.body.insertBefore(holder, document.body.firstChild);
       }
     }
-    // Compute FCI block
-    const computeFCI = (data, ctx) => {
+    // Compute FCI block (use function declaration so it's hoisted)
+    function computeFCI(data, ctx) {
       try {
         const to01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x)) : null);
         const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
@@ -1131,7 +1148,78 @@ function renderFavOppCompare(payload) {
         else { verdict='Слабый игрок'; color='#ef4444'; }
         return { FCI, verdict, color };
       } catch(_) { return null; }
-    };
+    }
+
+    // Hybrid Markov based on point differences across recent matches
+    function computeHybridMarkov(recFav, recOpp, k = 7) {
+      try {
+        const MS_DAY = 24*60*60*1000;
+        const parseDM = (s) => {
+          try {
+            if (!s) return null;
+            // Supports formats like "19.10 01:35" or "13.10"
+            const m = String(s).match(/(\d{1,2})[.\/-](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
+            if (!m) return null;
+            const dd = +m[1], mm = +m[2] - 1;
+            const now = new Date();
+            const yy = now.getFullYear();
+            const HH = m[3] != null ? +m[3] : 12;
+            const MM = m[4] != null ? +m[4] : 0;
+            const dt = new Date(yy, mm, dd, HH, MM, 0);
+            if (isNaN(dt.getTime())) return null;
+            return dt;
+          } catch(_) { return null; }
+        };
+        const countLast2Days = (arr) => {
+          try {
+            const now = new Date();
+            const cutoff = now.getTime() - 2*MS_DAY;
+            let c = 0;
+            (arr||[]).forEach(m => {
+              const d = parseDM(m?.date);
+              if (d && d.getTime() >= cutoff) c++;
+            });
+            return c;
+          } catch(_) { return 0; }
+        };
+        const pickWindow = (arr) => {
+          const c2d = countLast2Days(arr);
+          // Rule: <3 за 2 дня → берём 5 матчей; 5+ за 2 дня → 3 матча; иначе — 5
+          const n = (c2d >= 5) ? 3 : 5;
+          return (arr||[]).slice(0, n);
+        };
+
+        const diffs = (arr) => {
+          const out = [];
+          (arr||[]).forEach(m => {
+            const sets = Array.isArray(m.setsOwnOpponent) ? m.setsOwnOpponent : [];
+            sets.forEach(([a,b]) => { const aa=Number(a)||0, bb=Number(b)||0; out.push(aa-bb); });
+          });
+          return out;
+        };
+        const pSet = (arr) => {
+          const ds = diffs(arr);
+          if (!ds.length) return 0.5;
+          const ps = ds.map(d => 1/(1+Math.exp(-(d/k))));
+          return ps.reduce((s,v)=>s+v,0)/ps.length;
+        };
+        const p1 = pSet(pickWindow(recFav));
+        const p2 = pSet(pickWindow(recOpp));
+        const p = (p1+p2)>0 ? (p1/(p1+p2)) : 0.5;
+        const q = 1-p;
+        const P30 = p**3;
+        const P31 = 3*p**3*q;
+        const P32 = 6*p**3*q**2;
+        const P03 = q**3;
+        const P13 = 3*q**3*p;
+        const P23 = 6*q**3*p**2;
+        const Pwin = P30+P31+P32;
+        const Plose = P03+P13+P23;
+        const P2 = Pwin + P23;
+        const top = [['3:1',P31],['3:2',P32],['3:0',P30]].sort((a,b)=>b[1]-a[1])[0][0];
+        return { p_match: (Pwin/(Pwin+Plose)), p_2sets: P2, topScore: top };
+      } catch(_) { return null; }
+    }
     const fciCtx = {
       favIsA,
       base3: favIsA ? a3 : b3,
@@ -1194,7 +1282,7 @@ function renderFavOppCompare(payload) {
           }
           const visStr = favIsA ? baseVis : baseVis.replace(/🟢|🔴/g, m => (m === '🟢' ? '🔴' : '🟢'));
           const cell = holder.querySelector('.cmp-row.last10 .fav.last10');
-          if (cell) {
+  if (cell) {
             if (visStr && visStr.trim()) {
               cell.innerHTML = makeDots(visStr);
               clearInterval(id);
@@ -2501,11 +2589,11 @@ function buildAnalyzeData(userOpts = {}) {
     } catch(_) {}
 
     // -------- Новая логика формы (F) и силы (S*) для блока «Индекс силы и форма (10 игр)» --------
-    const clamp01 = (x)=> Math.max(0, Math.min(1, Number(x)||0));
+    const clamp01b = (x)=> Math.max(0, Math.min(1, Number(x)||0));
     const ema = (arr, a)=>{
       if (!Array.isArray(arr) || arr.length===0) return 0.5;
       let s = Number(arr[0])||0; for (let i=1;i<arr.length;i++){ s = a*(Number(arr[i])||0) + (1-a)*s; }
-      return clamp01(s);
+      return clamp01b(s);
     };
     const winsArray = (rec)=> (rec||[]).slice(0,10).map(m=>{ const fo=m?.finalScoreOwnOpponent; return (fo && Number(fo.own)>Number(fo.opponent)) ? 1 : 0; });
     const extFromPatterns = (pat)=>{
@@ -2531,7 +2619,7 @@ function buildAnalyzeData(userOpts = {}) {
       const lost2 = lastLosses(h2hArr,2); const won2 = (function(){ let cnt=0; for(let i=0;i<Math.min(2,(h2hArr||[]).length);i++){ const fo=h2hArr[i]?.finalScoreOwnOpponent; const win = fo && Number(fo.own)>Number(fo.opponent); if (win===true) cnt++; } return cnt===2; })();
       if (lost2) F_raw -= 0.2; else if (won2) F_raw += 0.1;
       const fresh = (function(){ const d=Number(lastDays); const w = 1 - (isNaN(d)?0:d/7); return Math.max(0.6, Math.min(1, w)); })();
-      return { F_slow, F_fast, F_final: clamp01(F_raw * fresh) };
+      return { F_slow, F_fast, F_final: clamp01b(F_raw * fresh) };
     };
     const FA = F_build(recA10, playerA?.pointsSummary5?.diff, playerA?.stats?.pointsSummary10?.diff, playerA?.stats?.lastGameDays, out.h2hOrientedA);
     const FB = F_build(recB10, playerB?.pointsSummary5?.diff, playerB?.stats?.pointsSummary10?.diff, playerB?.stats?.lastGameDays, out.h2hOrientedB);
@@ -2540,14 +2628,14 @@ function buildAnalyzeData(userOpts = {}) {
     const pd10A = Number(playerA?.stats?.pointsSummary10?.diff)||0;
     const pd10B = Number(playerB?.stats?.pointsSummary10?.diff)||0;
     const EXT_A = extFromPatterns(playerA?.patterns), EXT_B = extFromPatterns(playerB?.patterns);
-    const STAB_A = clamp01(playerA?.stability||0); const STAB_B = clamp01(playerB?.stability||0);
+    const STAB_A = clamp01b(playerA?.stability||0); const STAB_B = clamp01b(playerB?.stability||0);
     const h2hTot = Number(out?.h2h?.summary?.A?.total||0);
     const h2hA = Number(out?.h2h?.summary?.A?.wins||0); const h2hB = Number(out?.h2h?.summary?.B?.wins||0);
     const h2hScoreA = h2hTot>0 ? (h2hA/h2hTot) : 0.5; const h2hScoreB = h2hTot>0 ? (h2hB/h2hTot) : 0.5;
     const S_star = (Ff, pd10, EXT, STAB, h2h) => {
-      let S = 0.35*clamp01(Ff) + 0.25*clamp01(pd10/50) + 0.15*clamp01(EXT/100) + 0.15*clamp01(STAB) + 0.10*clamp01(h2h);
+      let S = 0.35*clamp01b(Ff) + 0.25*clamp01b(pd10/50) + 0.15*clamp01b(EXT/100) + 0.15*clamp01b(STAB) + 0.10*clamp01b(h2h);
       if (Math.abs(pd10) > 40) S *= 0.8;
-      return clamp01(S);
+      return clamp01b(S);
     };
     out.playerA.S_star = S_star(FA.F_final, pd10A, EXT_A, STAB_A, h2hScoreA);
     out.playerB.S_star = S_star(FB.F_final, pd10B, EXT_B, STAB_B, h2hScoreB);
@@ -3102,3 +3190,5 @@ function computeStabilityFromPatterns(p) {
   const score = clamp01(1 - bad + 0.5*good);
   return score;
 }
+
+})();

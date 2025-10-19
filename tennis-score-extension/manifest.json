@@ -64,8 +64,19 @@
     "http://tennis-score.pro/*",
     "http://www.tennis-score.pro/*"
   ],
+  "optional_host_permissions": [
+    "https://score-tennis.com/*",
+    "https://www.score-tennis.com/*",
+    "https://tennis-score.pro/*",
+    "https://www.tennis-score.pro/*",
+    "http://score-tennis.com/*",
+    "http://www.score-tennis.com/*",
+    "http://tennis-score.pro/*",
+    "http://www.tennis-score.pro/*"
+  ],
   "permissions": [
     "activeTab",
-    "tabs"
+    "tabs",
+    "scripting"
   ]
 }

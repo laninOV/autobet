@@ -1,10 +1,17 @@
 // ===== Bradley-Terry Model for Bo5 Tennis Matches =====
 // Ported locally from the other extension to be reusable here.
 
-// ===== Utilities =====
-const clamp01 = x => Math.min(1 - 1e-6, Math.max(1e-6, x));
-const logit = p => Math.log(p / (1 - p));
-const invLogit = z => 1 / (1 + Math.exp(-z));
+// Make this file idempotent: if already injected, do nothing
+(function(){
+  if (typeof window !== 'undefined') {
+    if (window.__TSX_BT_LIB_LOADED__) return;
+    window.__TSX_BT_LIB_LOADED__ = true;
+  }
+
+  // ===== Utilities =====
+  const clamp01 = x => Math.min(1 - 1e-6, Math.max(1e-6, x));
+  const logit = p => Math.log(p / (1 - p));
+  const invLogit = z => 1 / (1 + Math.exp(-z));
 
 const wstd = (xs) => {
   const m = xs.reduce((a,b)=>a+b,0)/Math.max(1,xs.length);
@@ -284,3 +291,5 @@ if (typeof window !== 'undefined') {
     btBettingStrategy
   };
 }
+
+})();
