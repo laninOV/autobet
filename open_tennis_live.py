@@ -355,6 +355,16 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
+        # Force allowed leagues per requested policy:
+        # always include "Кубок ТТ" and "Лига Про";
+        # include "Сетка Кап" only when --setka or AUTOBET_SETKA is provided
+        try:
+            env_setka = os.getenv('AUTOBET_SETKA')
+            want_setka = bool(getattr(args, 'setka', False)) or (env_setka is not None and str(env_setka).strip().lower() not in ('', '0', 'false', 'no'))
+        except Exception:
+            want_setka = False
+        filters = ["Кубок ТТ", "Лига Про"] + (["Сетка Кап"] if want_setka else [])
+
         # Учитываем флаг all: отключаем фильтрацию турниров и сохраняем все матчи
         try:
             if getattr(args, 'all', False):
