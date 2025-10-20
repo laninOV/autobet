@@ -1,3 +1,5 @@
-2025/10/20-22:00:29.594 17de89 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/MANIFEST-000001
-2025/10/20-22:00:29.595 17de89 Recovering log #55
-2025/10/20-22:00:29.596 17de89 Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000055.log 
+2025/10/21-01:23:26.521 197e6e Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/MANIFEST-000001
+2025/10/21-01:23:26.521 197e6e Recovering log #55
+2025/10/21-01:23:26.522 197e6e (ignoring error) /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000055.log: dropping 11223 bytes; Corruption: checksum mismatch
+2025/10/21-01:23:26.522 197e6e (ignoring error) /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000055.log: dropping 49 bytes; Corruption: missing start of fragmented record(2)
+2025/10/21-01:23:26.522 197e6e Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000055.log 

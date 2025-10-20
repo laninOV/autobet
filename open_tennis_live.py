@@ -1000,8 +1000,11 @@ def extract_favorite_and_opponents(page, lp: Optional[str] = None, rp: Optional[
         or re.search(r"Совпадений\s*:\s*2/3\b", source_text, re.IGNORECASE) is not None
     )
 
+    # Если нет явного решения GO/3/3/2/3, в обычном режиме прерываемся.
+    # В режиме ALLOW_NOTIFY_ALL продолжим попытку извлечь имена, чтобы отправить матч.
     if not (has_go or has_33 or has_23):
-        return (None, None, None, None)
+        if not (globals().get('ALLOW_NOTIFY_ALL') or globals().get('ALLOW_ALL')):
+            return (None, None, None, None)
 
     # 2) Пытаемся вытащить фаворита отдельно (если блок с фаворитом присутствует)
     fav = None
