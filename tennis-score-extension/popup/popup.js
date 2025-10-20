@@ -746,47 +746,38 @@ document.addEventListener('DOMContentLoaded', () => {
           try {
             const anchor = document.getElementById('favImproved');
             if (anchor) {
-              // Components for FCI v2.0 (fallback-friendly)
+              // Components for FCI v3.0 (consensus-focused)
               const to01 = (x)=> (typeof x==='number' && isFinite(x) ? Math.max(0,Math.min(1,x)) : null);
               const pct01 = (x)=> (typeof x==='number' && isFinite(x) ? Math.max(0,Math.min(1,x/100)) : null);
-              const base3 = pct01(fav.p3);
-              const form3 = pct01(fav.p3); // proxy for index P3 if not available
-              const logit3 = to01(favMl3);
-              // MBT (last-5 wins rate relative to favorite)
-              const lastWins = (rec, n=5)=>{ let w=0,t=0; (rec||[]).slice(0,n).forEach(m=>{ const fo=m?.finalScoreOwnOpponent||{}; const a=+fo.own||0, b=+fo.opponent||0; if(a||b||a===0||b===0){ t++; if(a>b) w++; } }); return t? (w/t) : null; };
-              const favRec = favIsA ? recA10 : recB10;
-              const oppRec = favIsA ? recB10 : recA10;
-              const p1 = lastWins(favRec,5); const p2 = lastWins(oppRec,5);
-              const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
-              // Committee probability (calibrated forecast/pred)
-              const pA_fore = (typeof d?.forecast?.pA === 'number') ? d.forecast.pA : (typeof d?.predWinProbA==='number'? d.predWinProbA/100 : null);
-              const pB_fore = (typeof d?.forecast?.pB === 'number') ? d.forecast.pB : (typeof d?.predWinProbB==='number'? d.predWinProbB/100 : null);
-              const committee = favIsA ? to01(pA_fore) : (pB_fore!=null? to01(1-pB_fore) : null);
-              const stability = favIsA ? to01(d?.playerA?.stability) : to01(d?.playerB?.stability);
-              // Adaptive weights
-              let w = { base:0.20, form:0.20, logit:0.15, mbt:0.30, committee:0.10, stab:0.05 };
-              if (Number.isFinite(fav.d5_10) && fav.d5_10 < -5) w.base = 0.15;
-              if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
-              if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
-              if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
-              const parts = [];
-              const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
-              push(base3,w.base); push(form3,w.form); push(logit3,w.logit); push(mbt,w.mbt); push(committee,w.committee); push(stability,w.stab);
-              let FCI = null;
-              if (parts.length){
-                const wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
-                FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
-                // Bonuses/penalties
-                const d5_10p = Number.isFinite(fav.d5_10)? fav.d5_10/100 : null;
-                const d3_5p  = Number.isFinite(fav.d3_5)?  fav.d3_5 /100 : null;
-                if (d3_5p!=null && d3_5p > 0) FCI += 0.02;
-                if (d3_5p!=null && d3_5p < -0.05) FCI -= 0.03;
-                if (d5_10p!=null && d5_10p < -0.05) FCI -= 0.05;
-                const stabPct = (typeof stability==='number') ? (stability*100) : null;
-                if (stabPct!=null && stabPct >= 90) FCI += 0.01;
-                if (stabPct!=null && stabPct < 80) FCI -= 0.02;
-                FCI = Math.max(0, Math.min(1, FCI));
+              function fciWindow(list){
+                const xs = (list||[]).filter(v=>v!=null && isFinite(v));
+                if (!xs.length) return null;
+                const m = xs.reduce((a,b)=>a+b,0)/xs.length;
+                const v = xs.reduce((s,x)=>s+(x-m)*(x-m),0)/xs.length;
+                const std = Math.sqrt(Math.max(0,v));
+                const sign = m - 0.5;
+                const agree = 1 - Math.min(std/0.25, 1);
+                return Math.max(0, Math.min(1, agree * (0.5 + 2*Math.abs(sign))));
               }
+              // Gather windows (favor-oriented)
+              const models3 = [];
+              const nb3 = pct01(fav.p3); if (nb3!=null) models3.push(nb3);
+              const log3 = to01(favMl3); if (log3!=null) models3.push(log3);
+              const models5 = []; const nb5 = pct01(fav.p5); if (nb5!=null) models5.push(nb5);
+              const models10 = []; const nb10 = pct01(fav.p10); if (nb10!=null) models10.push(nb10);
+              const f3 = fciWindow(models3);
+              const f5 = fciWindow(models5);
+              const f10 = fciWindow(models10);
+              let FCI = 0; if (f3!=null) FCI += 0.6*f3; if (f5!=null) FCI += 0.3*f5; if (f10!=null) FCI += 0.1*f10;
+              const stability = favIsA ? to01(d?.playerA?.stability) : to01(d?.playerB?.stability);
+              if (stability!=null) {
+                const oppStab = favIsA ? to01(d?.playerB?.stability) : to01(d?.playerA?.stability);
+                if (oppStab!=null) {
+                  if (stability>0.85 && oppStab>0.85 && Math.abs(stability-oppStab)<0.10) FCI += 0.05;
+                  else if (Math.min(stability, oppStab) < 0.70) FCI -= 0.05;
+                }
+              }
+              FCI = Math.max(0, Math.min(1, FCI));
               const val = (typeof FCI==='number') ? (FCI*100).toFixed(1)+'%' : '—';
               if (!document.getElementById('tsx-fci-inline')) {
                 const node = document.createElement('div');

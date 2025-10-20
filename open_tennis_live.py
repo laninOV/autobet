@@ -60,9 +60,8 @@ PARSE_UPCOMING = False
 # Глобальный Telegram sender (устанавливается в run())
 _TG_SENDER = None  # type: Optional[callable]
 
-# Глобальный режим по умолчанию: отправлять ВСЕ матчи (без требования GO/3/3/2/3)
-# Фильтр по лигам остаётся активным; флаг --all по-прежнему полностью убирает фильтр лиг.
-ALLOW_ALL = True
+# Глобальный режим: сохранять/отправлять ВСЕ матчи (без требования GO/3/3/2/3)
+ALLOW_ALL = False
 
 # Telegram defaults (user-provided token) and chat id cache file
 TG_DEFAULT_TOKEN = "8329315036:AAHEfnAf4ER7YE_dqFIsOMoO-s1b5G4kYTA"
@@ -73,7 +72,7 @@ DEFAULT_FILTERS = [
     # т.к. после него могут идти разные города/страны.
     "Лига Про",   # матчит любые варианты: "Лига Про. Минск", "Лига Про. Чехия" и т.п.
     "Кубок ТТ",   # матчит: "Кубок ТТ. Польша", "Кубок ТТ. Чехия" и др.
-    # Setka Cup исключён из дефолтного списка
+    "Сетка Кап",  # матчит любые варианты после "Сетка Кап ..."
 ]
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
@@ -236,26 +235,14 @@ FILTER_JS = r"""
 
 def _init_output_files():
     """Hard-reset output files and create fresh CSV with header.
-    New format:
-      time,favorite,opponent,
-      noBT3_noH2H, noBT3_H2H, logistic3_fav, indexP3_fav,
-      nb3_fav_noH2H, nb3_fav_H2H, nb3_opp_noH2H, nb3_opp_H2H,
-      last10_fav, last10_opp, h2h_total, league, url
+    New format: time_hms,favorite,opponent,nb3_noh2h_3,nb3_h2h_3,logistic3_fav,indexP3_fav,url
     """
-    keep_csv = bool(os.getenv("AUTOBET_KEEP_CSV"))
-    keep_processed = bool(os.getenv("AUTOBET_KEEP_PROCESSED"))
-
-    # Удаляем выходные файлы, если не включён режим сохранения
-    to_remove = []
-    if not keep_csv:
-        to_remove.extend([
-            (OUTPUT_LIVE_CSV, "matches_3of3.csv"),
-            (OUTPUT_LIVE_CSV_COMPAT, "live_3of3.csv"),
-        ])
-    if not keep_processed:
-        to_remove.append((PROCESSED_LIVE_JSON, "processed_live_urls.json"))
-
-    for path, label in to_remove:
+    paths = [
+        (OUTPUT_LIVE_CSV, "matches_3of3.csv"),
+        (OUTPUT_LIVE_CSV_COMPAT, "live_3of3.csv"),
+        (PROCESSED_LIVE_JSON, "processed_live_urls.json"),
+    ]
+    for path, label in paths:
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -264,28 +251,16 @@ def _init_output_files():
             print(f"[init] warn: cannot remove {label} at {path}: {e}")
     # create empty CSV with header
     try:
-        if not os.path.exists(OUTPUT_LIVE_CSV):
-            with open(OUTPUT_LIVE_CSV, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([
-                    "time", "favorite", "opponent",
-                    "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                    "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                    "last10_fav", "last10_opp", "h2h_total", "league", "url"
-                ])
-            print(f"[init] created header at {OUTPUT_LIVE_CSV}")
+        with open(OUTPUT_LIVE_CSV, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav", "url"])
+        print(f"[init] created header at {OUTPUT_LIVE_CSV}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV}: {e}")
     # инициализируем файл совместимости тем же заголовком
     try:
-        if not os.path.exists(OUTPUT_LIVE_CSV_COMPAT):
-            with open(OUTPUT_LIVE_CSV_COMPAT, "w", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([
-                    "time", "favorite", "opponent",
-                    "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                    "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                    "last10_fav", "last10_opp", "h2h_total", "league", "url"
-                ])
-            print(f"[init] created header at {OUTPUT_LIVE_CSV_COMPAT}")
+        with open(OUTPUT_LIVE_CSV_COMPAT, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav", "url"])
+        print(f"[init] created header at {OUTPUT_LIVE_CSV_COMPAT}")
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV_COMPAT}: {e}")
 
@@ -294,21 +269,12 @@ def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
 
     args = parse_args_for_runtime()
-    global ALLOW_ALL, PARSE_UPCOMING
 
     # Гарантированно очищаем файлы результатов перед запуском браузера
     _init_output_files()
 
     with sync_playwright() as p:
         ext_path = os.path.expanduser(args.extension_path) if hasattr(args, "extension_path") and args.extension_path else None
-        # Настройка прокси: берём из --proxy или переменных окружения
-        proxy_cfg = None
-        try:
-            if getattr(args, 'proxy', None):
-                proxy_cfg = { 'server': str(args.proxy) }
-                print(f"[net] proxy enabled: {args.proxy}")
-        except Exception:
-            pass
 
         context = None
         page = None
@@ -316,6 +282,7 @@ def run(filters: List[str]) -> None:
         # Enable PREMATCH if requested
         try:
             if getattr(args, 'prematch', False):
+                global PARSE_UPCOMING
                 PARSE_UPCOMING = True
         except Exception:
             pass
@@ -325,13 +292,7 @@ def run(filters: List[str]) -> None:
             if getattr(args, 'all', False):
                 # Пустая строка в ALLOWED заставляет фильтр пропускать все строки
                 filters[:] = [""]
-                ALLOW_ALL = True
-        except Exception:
-            pass
-
-        # Новый режим: слать все матчи, но только из выбранных лиг (фильтр лиг сохраняем)
-        try:
-            if getattr(args, 'all_in_leagues', False) or os.getenv('AUTOBET_ALL_IN_LEAGUES'):
+                global ALLOW_ALL
                 ALLOW_ALL = True
         except Exception:
             pass
@@ -412,7 +373,6 @@ def run(filters: List[str]) -> None:
             context = p.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=bool(getattr(args, 'headless', False)),
-                proxy=proxy_cfg,
                 args=[
                     f"--disable-extensions-except={ext_path}",
                     f"--load-extension={ext_path}",
@@ -421,7 +381,7 @@ def run(filters: List[str]) -> None:
             page = context.new_page() if len(context.pages) == 0 else context.pages[0]
         else:
             # Regular non-persistent context (no extension)
-            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)), proxy=proxy_cfg)
+            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)))
             storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
             context = browser.new_context(storage_state=storage)
             page = context.new_page()
@@ -433,14 +393,7 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
-        try:
-            page.goto(URL, wait_until="domcontentloaded", timeout=20000)
-        except Exception as e:
-            print("Ошибка: Page.goto не открыл live:", e)
-            print("Подсказка: проверьте интернет/VPN/прокси.\n"
-                  " - Можно запустить с --proxy=http://host:port (или AUTOBET_PROXY).\n"
-                  " - Убедитесь, что выполнены 'pip install playwright' и 'playwright install'.")
-            raise
+        page.goto(URL, wait_until="domcontentloaded")
 
         # Try to dismiss common cookie popups quickly (best-effort, ignore failures)
         for text in ("Принять", "Согласен", "Accept", "I Agree"):
@@ -476,11 +429,6 @@ def run(filters: List[str]) -> None:
                     except Exception:
                         pass
                 page.on("console", _console)
-                # Also surface page exceptions to the terminal for easier debugging
-                try:
-                    page.on("pageerror", lambda e: print(f"[pageerror] {e}"))
-                except Exception:
-                    pass
             except Exception:
                 pass
 
@@ -540,19 +488,8 @@ def run(filters: List[str]) -> None:
         if interval_sec is None:
             interval_sec = 60
 
-        # Поддержка бесконечного режима при bg_minutes <= 0
-        infinite = False
-        try:
-            infinite = int(bg_minutes) <= 0
-        except Exception:
-            infinite = False
-
-        if infinite:
-            print(f"[bg] Бесконечный режим: шаг {interval_sec} сек")
-            deadline = float('inf')
-        else:
-            print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
-            deadline = time.monotonic() + bg_minutes * 60
+        print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
+        deadline = time.monotonic() + bg_minutes * 60
         try:
             while time.monotonic() < deadline and not stop_event.is_set():
                 try:
@@ -607,27 +544,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EXTENSION_PATH,
         help="Путь к Chrome-расширению (будет загружено в persistent-профиль)",
     )
-    # Proxy settings for Chromium (helps if сайт заблокирован/требуется VPN)
-    parser.add_argument(
-        "--proxy",
-        dest="proxy",
-        default=os.getenv("AUTOBET_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"),
-        help="HTTP(S) прокси: например http://user:pass@host:port (либо AUTOBET_PROXY/HTTPS_PROXY/HTTP_PROXY)",
-    )
     # Фоновый режим (без окон): поддерживаем краткую форму -fon и длинную --headless
     parser.add_argument("-fon", "--headless", dest="headless", action="store_true",
                         help="Запуск Chromium в фоне (без окон). Требует поддержку headless-режима для расширений.")
     parser.add_argument("--fonbet-login", dest="fonbet_login", help="Логин (email/телефон) для fon.bet (или FONBET_LOGIN)")
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
-    parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30,
-                        help="Сколько минут сканировать в фоне (0 или <0 — бесконечно, по умолчанию 30)")
+    parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
                         help="Сколько миллисекунд ждать отрисовку блока решения (по умолчанию 2000)")
     parser.add_argument("--prematch", dest="prematch", action="store_true",
                         help="Также парсить up-games (PREMATCH) и сохранять в prema_3of3.csv")
-    parser.add_argument("--all-in-leagues", dest="all_in_leagues", action="store_true",
-                        help="Отправлять статистику по ВСЕМ матчам ТОЛЬКО из выбранных лиг (игнорировать GO/3/3)")
     # Telegram options
     parser.add_argument("-tg", "--tg", dest="tg", action="store_true", help="Отправлять подходящие матчи в Telegram")
     parser.add_argument("--tg-token", dest="tg_token", default=os.getenv("TELEGRAM_BOT_TOKEN", TG_DEFAULT_TOKEN), help="Telegram Bot API token (или TELEGRAM_BOT_TOKEN)")
@@ -791,10 +718,11 @@ def ensure_login(context, page, email: str, password: str) -> bool:
 
 # ---------------------- scanning/saving ----------------------
 
-def collect_filtered_stats_links(page) -> List[Tuple[str, Optional[str]]]:
+def collect_filtered_stats_links(page) -> List[str]:
     base = "https://tennis-score.pro"
-    # Собираем видимые ссылки на страницу статистики из отфильтрованных строк
-    items: List[Tuple[str, Optional[str]]] = []
+    # Собираем видимые ссылки на страницу статистики из отфильтрованных строк.
+    # Доп. фильтр: стараемся исключать строки PREMATCH (up-games) по эвристикам текста строки.
+    hrefs = []
     seen = set()
     anchors = page.locator("a[href*='/stats/?']")
     count = anchors.count()
@@ -802,35 +730,33 @@ def collect_filtered_stats_links(page) -> List[Tuple[str, Optional[str]]]:
         a = anchors.nth(i)
         try:
             # пропустим элементы внутри скрытых строк фильтра
-            hidden = a.evaluate("el => !!el.closest('__auto-filter-hidden__') || !!el.closest('.__auto-filter-hidden__')")
+            hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
             if hidden:
                 continue
+            # Определим контейнер строки и соберём текст
+            row_text = a.evaluate(
+                r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim().toLowerCase(); }"
+            ) or ""
+            # Эвристика LIVE: присутствуют признаки счёта/процесса
+            has_score = bool(re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", row_text))
+            live_markers = ("лайв" in row_text) or ("live" in row_text) or ("идет" in row_text) or ("идёт" in row_text) or ("сет" in row_text)
+            # Эвристика PREMATCH: индикаторы будущего начала
+            prem_markers = ("прематч" in row_text) or ("up-games" in row_text) or ("начало" in row_text) or ("начнется" in row_text) or ("начнётся" in row_text) or ("через" in row_text and "мин" in row_text)
+            if prem_markers and not (has_score or live_markers):
+                # Похоже на предматч — пропустим
+                continue
+
             href = a.get_attribute("href") or ""
             if not href or href.startswith("#"):
                 continue
             abs_url = urljoin(base, href)
-            # Пытаемся угадать лигу по тексту строки
-            try:
-                row_text = a.evaluate("el => (el.closest('tr') || el.closest('.row') || el.closest('[role=\\'row\\']') || el).innerText || ''") or ""
-            except Exception:
-                row_text = ""
-            league_guess = None
-            if row_text:
-                tlow = str(row_text).lower()
-                for tok in DEFAULT_FILTERS:
-                    try:
-                        t = str(tok).strip()
-                        if t and t.lower() in tlow:
-                            league_guess = t
-                            break
-                    except Exception:
-                        continue
-            if abs_url not in seen:
-                items.append((abs_url, league_guess))
-                seen.add(abs_url)
+            if abs_url in seen:
+                continue
+            seen.add(abs_url)
+            hrefs.append(abs_url)
         except Exception:
             continue
-    return items
+    return hrefs
 
 
 def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
@@ -999,18 +925,12 @@ def extract_favorite_and_opponents(page, lp: Optional[str] = None, rp: Optional[
     return (fav, opponent, title, reason)
 
 
-def scan_and_save_stats(context, links: List, output_csv: str, processed_path: str, stop_event: Optional[threading.Event] = None) -> None:
+def scan_and_save_stats(context, links: List[str], output_csv: str, processed_path: str, stop_event: Optional[threading.Event] = None) -> None:
     processed = load_processed_urls(processed_path)
     skipped_processed = 0
     visited = 0
     saved = 0
-    for _item in links:
-        if isinstance(_item, (list, tuple)) and len(_item) >= 1:
-            url = _item[0]
-            league_hint = (_item[1] if len(_item) > 1 else None)
-        else:
-            url = _item
-            league_hint = None
+    for url in links:
         if stop_event is not None and stop_event.is_set():
             print("[stop] Прервано пользователем (Enter)")
             break
@@ -1035,10 +955,7 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
 
             # Дожидаемся (настраиваемое время), пока расширение отрисует блок (GO/3/3/2/3)
             # Независимый расчёт Формы(3) и логистики может занимать > 1 сек
-            try:
-                wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
-            except Exception:
-                pass
+            wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
             lp, rp = parse_players_from_stats_url(url)
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
             # Если не нашли сразу — краткая повторная попытка
@@ -1048,199 +965,33 @@ def scan_and_save_stats(context, links: List, output_csv: str, processed_path: s
                 except Exception:
                     pass
                 fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
-            # Если режим ALLOW_ALL и не определён фаворит — подставим имена из URL/DOM
-            if ALLOW_ALL and (not fav or not opp):
-                try:
-                    # Попробуем взять из URL
-                    lp2, rp2 = parse_players_from_stats_url(url)
-                    if not fav and lp2:
-                        fav = lp2
-                    if not opp and rp2:
-                        opp = rp2
-                    # Если ещё нет — из DOM
-                    if not fav or not opp:
-                        names = page.evaluate("""
-                            () => {
-                              const set = new Set();
-                              const add = s => { if (s) { s = String(s).trim(); if (s && s.length <= 40) set.add(s); } };
-                              document.querySelectorAll('.table-top .gamer-name, a[href*="/players/"]').forEach(el => add(el.textContent));
-                              const arr = Array.from(set).filter(Boolean);
-                              return arr.slice(0,2);
-                            }
-                        """) or []
-                        if isinstance(names, list):
-                            if not fav and len(names) >= 1:
-                                fav = names[0]
-                            if not opp and len(names) >= 2:
-                                opp = names[1]
-                except Exception:
-                    pass
-
             if fav and opp and (reason or ALLOW_ALL):
                 # Извлечь метрики для новой строки CSV
                 metrics = _extract_metrics_for_csv(page, fav, opp)
-                # Попробовать извлечь последовательность last10 (кружочки)
-                last10_fav = None
-                last10_opp = None
-                nb3_fav_no = None
-                nb3_fav_h2 = None
-                nb3_opp_no = None
-                nb3_opp_h2 = None
-                try:
-                    # Короткое ожидание появления блока сравнения/точек
-                    try:
-                        page.wait_for_function("() => !!document.querySelector('.min2-compare .cmp-row.last10 .fav.last10 .dot, .fav.last10 .dot')", timeout=1200)
-                    except Exception:
-                        pass
-                    try:
-                        page.wait_for_function("() => !!document.querySelector('.table-top .total, .total')", timeout=1200)
-                    except Exception:
-                        pass
-                    hs = _extract_h2h_and_score(page, fav, opp) or {}
-                    last10_fav = hs.get('favDots') or None
-                    last10_opp = hs.get('oppDots') or None
-                    h2h_total = hs.get('score') or None
-                    # Попробуем вытащить nb3 без/с H2H для фаворита и оппонента
-                    try:
-                        cmp = _extract_compare_block(page)
-                    except Exception:
-                        cmp = None
-                    if isinstance(cmp, dict):
-                        nb = cmp.get('nb3') or {}
-                        fav_nb = nb.get('fav') or {}
-                        opp_nb = nb.get('opp') or {}
-                        def _num(x):
-                            try:
-                                return float(x) if isinstance(x, (int, float)) else (float(str(x).replace(',', '.')) if isinstance(x, str) and x else None)
-                            except Exception:
-                                return None
-                        nb3_fav_no = _num(fav_nb.get('noH2H'))
-                        nb3_fav_h2 = _num(fav_nb.get('h2h'))
-                        nb3_opp_no = _num(opp_nb.get('noH2H'))
-                        nb3_opp_h2 = _num(opp_nb.get('h2h'))
-                        # Fallbacks for dots and H2H score from compare block
-                        if not last10_fav:
-                            last10_fav = ((cmp.get('last10') or {}).get('favDots')) or last10_fav
-                        if not last10_opp:
-                            last10_opp = ((cmp.get('last10') or {}).get('oppDots')) or last10_opp
-                        if not h2h_total:
-                            h2h_total = cmp.get('h2hScore') or h2h_total
-                except Exception:
-                    pass
-                league = league_hint or _extract_league_name(page)
-                save_match_row(
-                    url, fav, opp, metrics, output_csv,
-                    last10_fav=last10_fav, last10_opp=last10_opp,
-                    nb3_fav_no=nb3_fav_no, nb3_fav_h2=nb3_fav_h2,
-                    nb3_opp_no=nb3_opp_no, nb3_opp_h2=nb3_opp_h2,
-                    h2h_total=h2h_total,
-                    league=league,
-                )
+                save_match_row(url, fav, opp, metrics, output_csv)
                 # Telegram notify if configured (new formatted message using compare block if available)
                 try:
                     if _TG_SENDER:
                         compare = _extract_compare_block(page)
-                        # Enrich/override H2H dots and score via generic DOM extractor
+                        # Prefer H2H score from compare; fallback to current match score if needed
+                        h2h_score = None
                         try:
-                            # Wait up to ~4s in total for all key blocks
-                            page.wait_for_function(
-                                "() => !!document.querySelector('.min2-compare')",
-                                timeout=1200,
-                            )
+                            if isinstance(compare, dict):
+                                h2h_score = compare.get('h2hScore')
                         except Exception:
                             pass
-                        try:
-                            page.wait_for_function(
-                                "() => !!document.querySelector('.min2-compare .cmp-row.last10 .fav.last10 .dot, .fav.last10 .dot')",
-                                timeout=1800,
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            page.wait_for_function(
-                                "() => !!document.querySelector('table.kmp_srt_results.main-table tbody tr.personal-meetings')",
-                                timeout=1500,
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            page.wait_for_function(
-                                "() => !!document.querySelector('.table-top .total')",
-                                timeout=1500,
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            hs = _extract_h2h_and_score(page, fav, opp)
-                        except Exception:
-                            hs = { 'favDots': None, 'oppDots': None, 'score': None }
-                        if not isinstance(compare, dict):
-                            compare = {
-                                'favName': fav,
-                                'oppName': opp,
-                                'nb3': { 'fav': {}, 'opp': {} },
-                                'ml3': { 'fav': None, 'opp': None },
-                                'idx3': { 'fav': None, 'opp': None },
-                                'd35': { 'fav': None, 'opp': None },
-                                'last10': { 'favDots': None, 'oppDots': None },
-                            }
-                        # Fill compare from values we already parsed, if any
-                        try:
-                            # NB3
-                            if nb3_fav_no is not None or nb3_fav_h2 is not None:
-                                compare.setdefault('nb3', {}).setdefault('fav', {})
-                                if nb3_fav_no is not None:
-                                    compare['nb3']['fav']['noH2H'] = nb3_fav_no
-                                if nb3_fav_h2 is not None:
-                                    compare['nb3']['fav']['h2h'] = nb3_fav_h2
-                            if nb3_opp_no is not None or nb3_opp_h2 is not None:
-                                compare.setdefault('nb3', {}).setdefault('opp', {})
-                                if nb3_opp_no is not None:
-                                    compare['nb3']['opp']['noH2H'] = nb3_opp_no
-                                if nb3_opp_h2 is not None:
-                                    compare['nb3']['opp']['h2h'] = nb3_opp_h2
-                            # ML3 / IDX3 from fallback metrics (log3, idx3)
+                        if not h2h_score:
                             try:
-                                no_bt_3, with_h2h_3, log3, idx3 = metrics
+                                h2h_score = _extract_current_score(page)
                             except Exception:
-                                log3 = None; idx3 = None
-                            if isinstance(log3, (int, float)):
-                                compare.setdefault('ml3', {})['fav'] = log3
-                                compare['ml3']['opp'] = max(0, 100 - float(log3))
-                            if isinstance(idx3, (int, float)):
-                                compare.setdefault('idx3', {})['fav'] = idx3
-                                compare['idx3']['opp'] = max(0, 100 - float(idx3))
-                            # last10 dots if we already extracted
-                            if last10_fav:
-                                compare.setdefault('last10', {})['favDots'] = last10_fav
-                            if last10_opp:
-                                compare.setdefault('last10', {})['oppDots'] = last10_opp
-                        except Exception:
-                            pass
-                        # Override names from compare header if present (cleaned)
+                                h2h_score = None
+                        # Определим полное название лиги для заголовка сообщения
+                        league = None
                         try:
-                            fn = _clean_name(compare.get('favName')) if isinstance(compare, dict) else None
-                            on = _clean_name(compare.get('oppName')) if isinstance(compare, dict) else None
-                            if fn and on:
-                                fav, opp = fn, on
+                            league = _extract_league_name(page)
                         except Exception:
-                            pass
-                        # Apply H2H data
-                        try:
-                            h2h_f = (hs.get('h2hFav') if isinstance(hs, dict) else None) or hs.get('favDots')
-                            h2h_o = (hs.get('h2hOpp') if isinstance(hs, dict) else None) or hs.get('oppDots')
-                            if h2h_f or h2h_o:
-                                compare['h2hDots'] = { 'fav': h2h_f, 'opp': h2h_o }
-                            if hs.get('score'):
-                                compare['h2hScore'] = hs.get('score')
-                        except Exception:
-                            pass
-                        league = league_hint or _extract_league_name(page)
-                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, compare.get('h2hScore'), league=league)
-                        try:
-                            msg = _cleanup_tg_text(msg)
-                        except Exception:
-                            pass
+                            league = None
+                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, h2h_score, league=league)
                         _TG_SENDER(msg)
                 except Exception:
                     pass
@@ -1309,65 +1060,6 @@ def _norm_name(s: Optional[str]) -> str:
     except Exception:
         return t
 
-def _clean_name(s: Optional[str]) -> Optional[str]:
-    """Strip emojis/symbols and excessive spaces from a player name.
-    Returns a readable name or None.
-    """
-    if not isinstance(s, str):
-        return None
-    # Remove most emoji/symbol ranges and trim
-    t = re.sub(r"[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\U0001F000-\U0001FAFF]", " ", s)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t or None
-
-
-def _extract_league_name(page) -> Optional[str]:
-    """Try to extract league/tournament name from the stats page.
-    Heuristic: look for known base tokens (DEFAULT_FILTERS) in the page text
-    and return the longest matching token; otherwise None.
-    """
-    # 1) Try common selectors near the header/breadcrumbs
-    try:
-        text_candidates = page.evaluate(
-            """
-            () => {
-              const pick = (sel) => Array.from(document.querySelectorAll(sel))
-                 .map(el => (el.innerText||el.textContent||'').trim()).filter(Boolean);
-              const arr = [];
-              arr.push(...pick('.breadcrumbs, .breadcrumb, nav[aria-label="breadcrumb"]'));
-              arr.push(...pick('.table-top, .container-xl .mb-5, .container-xl'));
-              arr.push(...pick('h1, h2, .badge, .label, .tournament, .league'));
-              return arr.slice(0, 50).join('\n');
-            }
-            """
-        ) or ''
-    except Exception:
-        text_candidates = ''
-    # 2) Fallback to full body text
-    if not text_candidates:
-        try:
-            text_candidates = page.locator('body').inner_text(timeout=1500)
-        except Exception:
-            text_candidates = ''
-    if not text_candidates:
-        return None
-    text_low = str(text_candidates).lower()
-    candidates = []
-    for tok in (DEFAULT_FILTERS or []):
-        try:
-            t = str(tok).strip()
-            if not t:
-                continue
-            if t.lower() in text_low:
-                candidates.append(t)
-        except Exception:
-            continue
-    if candidates:
-        # prefer the longest token (e.g., 'Кубок ТТ' over 'Кубок')
-        candidates.sort(key=lambda s: (-len(s), s))
-        return candidates[0]
-    return None
-
 
 def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
     """Parse page text to extract:
@@ -1397,56 +1089,6 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
             # NB values не выводятся в блоке — оставляем None
             if log3 is not None or idx3 is not None:
                 return (None, None, log3, idx3)
-    except Exception:
-        pass
-
-    # 1b) Site-native fallback: parse "Вероятность (без BT)" table if present
-    try:
-        v = page.evaluate(
-            """
-            () => {
-              const txt = (sel) => { const el = document.querySelector(sel); return el ? (el.innerText||el.textContent||'') : ''; };
-              const parseRow = (idSel) => {
-                const root = document.querySelector(idSel);
-                const block = root ? root.closest('tr').querySelector('.nb-entry') : null;
-                const out = { no: { p10:null,p5:null,p3:null }, with: { p10:null,p5:null,p3:null }, name: '' };
-                try { out.name = txt(idSel).replace(/\(.*?\)/g,'').trim(); } catch(_){ out.name=''; }
-                if (block){
-                  const t = (block.innerText||block.textContent||'').replace(/\s+/g,' ');
-                  const mNo  = t.match(/без\s*H2H\s*10:\s*([\d.,]+)%\s*•\s*5:\s*([\d.,]+)%\s*•\s*3:\s*([\d.,]+)%/i);
-                  const mWith= t.match(/с\s*H2H\s*10:\s*([\d.,]+)%\s*•\s*5:\s*([\d.,]+)%\s*•\s*3:\s*([\d.,]+)%/i);
-                  const toNum = (s)=>{ if(!s)return null; const v=parseFloat(String(s).replace(',','.')); return isFinite(v)? v: null; };
-                  if (mNo){ out.no.p10=toNum(mNo[1]); out.no.p5=toNum(mNo[2]); out.no.p3=toNum(mNo[3]); }
-                  if (mWith){ out.with.p10=toNum(mWith[1]); out.with.p5=toNum(mWith[2]); out.with.p3=toNum(mWith[3]); }
-                }
-                return out;
-              };
-              return { A: parseRow('#probNoBtNameA'), B: parseRow('#probNoBtNameB') };
-            }
-            """
-        )
-        if isinstance(v, dict) and 'A' in v and 'B' in v:
-            def pick_p3(obj):
-                try:
-                    return float(obj.get('no',{}).get('p3')) if obj.get('no',{}).get('p3') is not None else (
-                           float(obj.get('with',{}).get('p3')) if obj.get('with',{}).get('p3') is not None else None)
-                except Exception:
-                    return None
-            A = v.get('A') or {}
-            B = v.get('B') or {}
-            # Decide orientation by matching names to fav/opp
-            def norm(s):
-                return re.sub(r"\s+", " ", str(s or '')).strip().lower()
-            na = norm(A.get('name'))
-            nb = norm(B.get('name'))
-            f = norm(fav)
-            o = norm(opp)
-            a_is_fav = (f and na and f in na) or (o and nb and o in nb and not (f and nb and f in nb))
-            fav_p3 = pick_p3(A if a_is_fav else B)
-            opp_p3 = pick_p3(B if a_is_fav else A)
-            if fav_p3 is not None or opp_p3 is not None:
-                # return as (noBT3_noH2H, noBT3_H2H, log3, idx3)
-                return (None, None, fav_p3, fav_p3)
     except Exception:
         pass
 
@@ -1615,137 +1257,6 @@ def _extract_current_score(page) -> Optional[str]:
     return None
 
 
-def _extract_h2h_and_score(page, fav: Optional[str] = None, opp: Optional[str] = None) -> dict:
-    """Extract H2H dots (fav/opp) from DOM, preferably from a combined last10 row,
-    and an H2H score from a nearby <div class="total">L : R</div> within the same block.
-    Returns dict: { 'favDots': str|None, 'oppDots': str|None, 'score': str|None }.
-    """
-    try:
-        FAV = _norm_name(fav) if fav else ''
-        OPP = _norm_name(opp) if opp else ''
-        res = page.evaluate(
-            """
-            (FAV, OPP) => {
-              const out = { favDots: null, oppDots: null, h2hFav: null, h2hOpp: null, score: null };
-              const normName = (s) => (s||'')
-                .replace(/[\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u2600-\u27BF\u1F000-\u1FAFF]/g,' ')
-                .replace(/^[^\p{L}\p{N}]+/gu,'')
-                .replace(/[^\p{L}\p{N}\s]+/gu,' ')
-                .replace(/\s+/g,' ').trim().toLowerCase();
-              const mapDots = (el) => {
-                if (!el) return null;
-                const dots = el.querySelectorAll('.dot');
-                if (!dots || dots.length === 0) return null;
-                const arr = [];
-                for (const d of dots) {
-                  arr.push(d.classList.contains('dot-win') ? '🟢' : (d.classList.contains('dot-loss') ? '🔴' : ''));
-                }
-                return arr.join('');
-              };
-              // Prefer exact block .min2-compare
-              const root = document.querySelector('.min2-compare') || document;
-              // Exact last10 node for favorite inside this block
-              let favLast = root.querySelector('.cmp-row.last10 .fav.last10');
-              if (!favLast) favLast = root.querySelector('.fav.last10');
-              // Opponent last10, if present as separate node
-              let oppLast = root.querySelector('.cmp-row.last10 .opp.last10');
-              if (!oppLast) oppLast = root.querySelector('.opp.last10');
-              let favDots = mapDots(favLast);
-              let oppDots = mapDots(oppLast);
-              if (!oppDots && favDots) {
-                oppDots = favDots.split('').map(ch => ch === '🟢' ? '🔴' : (ch === '🔴' ? '🟢' : ch)).join('');
-              }
-              out.favDots = favDots || null;
-              out.oppDots = oppDots || null;
-              // Build H2H dots from personal-meetings table if present
-              try {
-                  // Detect left/right names from nearest .table-top
-                  let lName = '', rName = '';
-                  const nearTotal = (root.closest('#stats-base')||document).querySelector('.table-top .total');
-                  const nearTop = nearTotal ? nearTotal.closest('.table-top') : null;
-                  if (nearTop) {
-                    const nms = nearTop.querySelectorAll('.gamer-name');
-                    lName = nms && nms[0] ? nms[0].textContent : '';
-                    rName = nms && nms[1] ? nms[1].textContent : '';
-                  }
-                  lName = normName(lName); rName = normName(rName);
-                  const favIsLeft = !!(FAV && lName && FAV === lName);
-                  // Find H2H main table
-                  const base = (root.closest('#stats-base')||document);
-                  // Prefer non-clone main table
-                  let mainTbody = base.querySelector('table.kmp_srt_results.main-table:not(.clone) tbody');
-                  if (!mainTbody) mainTbody = base.querySelector('table.kmp_srt_results.main-table tbody');
-                  const rows = mainTbody ? Array.from(mainTbody.querySelectorAll('tr.personal-meetings')).slice(0, 12) : [];
-                  if (rows.length) {
-                    const seq = [];
-                    for (const tr of rows) {
-                      const leftWon = tr.classList.contains('win');
-                      const favWon = favIsLeft ? leftWon : !leftWon;
-                      seq.push(favWon ? '🟢' : '🔴');
-                    }
-                    if (seq.length) {
-                      out.h2hFav = seq.join('');
-                      out.h2hOpp = seq.map(ch => ch === '🟢' ? '🔴' : '🟢').join('');
-                    }
-                  }
-              } catch(_){ }
-              // Score from <div class="total">L : R</div>
-              // Score from DOM: prefer nearest .table-top .total relative to min2-compare
-              let L = null, R = null;
-              const findNearestTotal = (r) => {
-                if (!r) return document.querySelector('.table-top .total, .total');
-                // Check siblings after the compare block
-                let p = r.parentElement;
-                for (let n = r.nextElementSibling; n; n = n.nextElementSibling) {
-                  const t = n.querySelector('.table-top .total, .total');
-                  if (t) return t;
-                }
-                // Then siblings before
-                for (let n = r.previousElementSibling; n; n = n.previousElementSibling) {
-                  const t = n.querySelector('.table-top .total, .total');
-                  if (t) return t;
-                }
-                // Finally within parent
-                if (p) {
-                  const t = p.querySelector('.table-top .total, .total');
-                  if (t) return t;
-                }
-                return document.querySelector('.table-top .total, .total');
-              };
-              let cont = findNearestTotal(root);
-              if (cont) {
-                const s = (cont.innerText || cont.textContent || '').trim();
-                const m = s.match(/(\d{1,2})\s*[:\-–—]\s*(\d{1,2})/);
-                if (m) { L = m[1]; R = m[2]; }
-                // Try to orient by nearby gamer-name nodes
-                const row = cont.closest('.table-top') || cont.parentElement;
-                if (row) {
-                  const names = row.querySelectorAll('.gamer-name');
-                  let leftName = names && names[0] ? names[0].textContent : '';
-                  let rightName = names && names[1] ? names[1].textContent : '';
-                  leftName = normName(leftName);
-                  rightName = normName(rightName);
-                  if (L !== null && R !== null) {
-                    if (FAV && leftName && FAV === leftName) out.score = `${L}:${R}`;
-                    else if (FAV && rightName && FAV === rightName) out.score = `${R}:${L}`;
-                    else out.score = `${L}:${R}`;
-                  }
-                } else if (L !== null && R !== null) {
-                  out.score = `${L}:${R}`;
-                }
-              }
-              return out;
-            }
-            """,
-            FAV, OPP,
-        )
-        if isinstance(res, dict):
-            return res
-    except Exception:
-        pass
-    return { 'favDots': None, 'oppDots': None, 'score': None }
-
-
 def _extract_compare_block(page) -> Optional[dict]:
     """Extracts values from new compare block (.min2-compare) rendered by the extension.
     Returns a dict or None if the block is not found.
@@ -1815,17 +1326,25 @@ def _extract_compare_block(page) -> Optional[dict]:
               if (!oppLastEl) oppLastEl = root.querySelector('.last10 .opp, .opp.last10');
               const rFav = readDots(favLastEl);
               const rOpp = readDots(oppLastEl);
-              // Visualization rows for each player (recent results, not H2H)
-              let favVizEl = root.querySelector('.cmp-row.viz .fav.viz');
-              let oppVizEl = root.querySelector('.cmp-row.viz .opp.viz');
-              const rFavViz = readDots(favVizEl);
-              const rOppViz = readDots(oppVizEl);
+              // Additional fallback: visualization row tokens per player
+              const onlyDots = (s)=> (String(s||'').match(/[🟢🔴]/g)||[]).join('');
+              const vizFavDots = (function(){ const el=root.querySelector('.cmp-row.viz .fav.viz'); return onlyDots(el? (el.innerText||el.textContent||'') : ''); })();
+              const vizOppDots = (function(){ const el=root.querySelector('.cmp-row.viz .opp.viz'); return onlyDots(el? (el.innerText||el.textContent||'') : ''); })();
               // Per user request: use last10 row as H2H series relative to favorite
               let h2hFav = rFav;
               let h2hOpp = rOpp && rOpp.dots ? rOpp : (function(){
                 const inv = (rFav.dots || '').split('').map(ch => ch === '🟢' ? '🔴' : (ch === '🔴' ? '🟢' : ch)).join('');
                 return { dots: inv, w: null, l: null };
               })();
+              // If dedicated last10 block renders combined H2H tokens as text, extract them
+              try {
+                const last10Row = root.querySelector('.cmp-row.last10');
+                if (last10Row) {
+                  const tx = (last10Row.innerText || last10Row.textContent || '').trim();
+                  const tok = (tx.match(/[🟢🔴]/g) || []).join('');
+                  if (tok) { h2hFav = { dots: tok, w: null, l: null }; }
+                }
+              } catch(_){ }
               // Try to derive H2H score: prefer DOM total like <div class="total">5 : 5</div>
               let h2hScore = null;
               try {
@@ -1866,16 +1385,62 @@ def _extract_compare_block(page) -> Optional[dict]:
                   }
                 }
               } catch(_){ }
+              // FCI percent from inline row (if present)
+              let fciPct = null;
+              try {
+                const fciEl = root.querySelector('.cmp-row.fci');
+                if (fciEl) {
+                  const t = (fciEl.innerText || fciEl.textContent || '').replace(/\s+/g,' ').trim();
+                  const m = t.match(/FCI\s*:\s*([\d.,]+)/i);
+                  if (m) {
+                    const v = parseFloat(String(m[1]).replace(',', '.'));
+                    if (!Number.isNaN(v)) fciPct = v;
+                  }
+                }
+              } catch(_){ }
+              // Committee calibrated percent (if present)
+              let committeePct = null;
+              try {
+                const cEl = root.querySelector('.cmp-row.committee');
+                if (cEl) {
+                  const tt = (cEl.innerText || cEl.textContent || '').replace(/\s+/g,' ').trim();
+                  const mc = tt.match(/комитет\s*\(калибр\.\)\s*:\s*([\d.,]+)/i);
+                  if (mc) {
+                    const vv = parseFloat(String(mc[1]).replace(',', '.'));
+                    if (!Number.isNaN(vv)) committeePct = vv;
+                  }
+                }
+              } catch(_){ }
+              // Markov–BT row (probability and top score)
+              let mbt = null;
+              try {
+                const mbtEl = root.querySelector('.cmp-row.mbt');
+                if (mbtEl) {
+                  const tt = (mbtEl.innerText || mbtEl.textContent || '').replace(/\s+/g,' ').trim();
+                  const mp = tt.match(/марков[–-]bt\s*([\d.,]+)%/i);
+                  const ms = tt.match(/Топ\s*[-–—]?\s*сч[её]т\s*:\s*([0-9:]+)/i);
+                  const out = {};
+                  if (mp) {
+                    const pv = parseFloat(String(mp[1]).replace(',', '.'));
+                    if (!Number.isNaN(pv)) out.pct = pv;
+                  }
+                  if (ms) out.bestScore = ms[1];
+                  if (Object.keys(out).length) mbt = out;
+                }
+              } catch(_){ }
               return {
                 favName, oppName,
                 nb3: { fav: { noH2H: nbFav_no, h2h: nbFav_h2 }, opp: { noH2H: nbOpp_no, h2h: nbOpp_h2 } },
                 ml3: { fav: mlFav, opp: mlOpp },
                 idx3: { fav: idxFav, opp: idxOpp },
                 d35: { fav: dFav || null, opp: dOpp || null },
-                last10: { favDots: rFav.dots, favW: rFav.w, favL: rFav.l, oppDots: rOpp.dots, oppW: rOpp.w, oppL: rOpp.l },
-                viz10:  { favDots: rFavViz.dots, oppDots: rOppViz.dots },
+                last10: { favDots: (rFav.dots||vizFavDots||null), favW: rFav.w, favL: rFav.l, oppDots: (rOpp.dots||vizOppDots||null), oppW: rOpp.w, oppL: rOpp.l },
+                vizDots: { fav: vizFavDots, opp: vizOppDots },
                 h2hDots: { fav: h2hFav.dots, opp: h2hOpp.dots },
                 h2hScore,
+                fciPct,
+                committeePct,
+                mbt,
               };
             }
             """
@@ -1887,454 +1452,249 @@ def _extract_compare_block(page) -> Optional[dict]:
         return None
 
 
-def _format_tg_message_new(fav: str, opp: str, url: str, compare: Optional[dict], fallback_metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], h2h_score: Optional[str] = None, league: Optional[str] = None) -> str:
-    """Compact message with aligned columns under player names.
-    Uses a <pre> block to keep spacing and aligns left/right values in columns
-    so each metric stays directly under the corresponding player name.
-    Also adds optional H2H score+dots as a separate line before the link.
+def _extract_league_name(page) -> Optional[str]:
+    """Пытается извлечь полное название лиги/турнира со страницы статистики.
+    Возвращает строку или None, если распознать не удалось.
+    Эвристики:
+      - ищем подписи вида "Турнир: ..." или "Лига: ..." в тексте страницы
+      - ищем фразы, начинающиеся с известных префиксов ("Лига Про", "Кубок ТТ", "Сетка Кап")
+    """
+    try:
+        body = page.locator('body').inner_text(timeout=1500)
+    except Exception:
+        body = ""
+    text = re.sub(r"\s+", " ", body or "").strip()
+    if not text:
+        return None
+
+    # 1) Явные подписи
+    for pat in (
+        r"(?:Турнир|Лига)\s*[:\-–—]\s*([^\n\r]+)",
+        r"Турнир\s*\.?\s*([^\n\r]+)",
+    ):
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            val = (m.group(1) or '').strip()
+            # Ограничим разумную длину и уберём хвост после 'Статистика' и т.п.
+            val = re.split(r"\s{2,}|\sСтатистика\b|\sИгроки\b", val)[0].strip()
+            if 2 <= len(val) <= 80:
+                return val
+
+    # 2) По известным префиксам: забираем всю фразу до конца предложения/строки
+    prefixes = ["Лига Про", "Кубок ТТ", "Сетка Кап"]
+    best = None
+    best_len = 0
+    for pfx in prefixes:
+        m = re.search(rf"\b{re.escape(pfx)}[^\n\r]*", text, flags=re.IGNORECASE)
+        if m:
+            cand = m.group(0).strip()
+            # Обрезаем по жёстким разделителям, если встретятся
+            cand = re.split(r"\sСтатистика\b|\sИгроки\b|https?://", cand)[0].strip()
+            if best is None or len(cand) > best_len:
+                best, best_len = cand, len(cand)
+    if best_len:
+        return best
+
+    return None
+
+
+def _format_tg_message_new(
+    fav: str,
+    opp: str,
+    url: str,
+    compare: Optional[dict],
+    fallback_metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]],
+    h2h_score: Optional[str] = None,
+    league: Optional[str] = None,
+) -> str:
+    """Compose a Telegram message using the new compare block when available.
+    Falls back to the old 4-line format based on fallback_metrics.
     """
     ts = datetime.now().strftime('%H:%M')
-    # Escape helper
-    def esc(s: str) -> str:
-        return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
-
-    # Extract values if available
-    d_f = d_o = '—'
-    ml_f = ml_o = None
-    idx_f = idx_o = None
-    nb_fav_no = nb_fav_h2 = nb_opp_no = nb_opp_h2 = None
     if isinstance(compare, dict):
+        # New requested layout focused on last-10 dots and MBT/FCI lines
         try:
-            d35 = compare.get('d35') or {}
-            d_f = d35.get('fav') or d_f
-            d_o = d35.get('opp') or d_o
-            ml = compare.get('ml3') or {}
-            ml_f = ml.get('fav') if ml.get('fav') is not None else ml_f
-            ml_o = ml.get('opp') if ml.get('opp') is not None else ml_o
-            idx = compare.get('idx3') or {}
-            idx_f = idx.get('fav') if idx.get('fav') is not None else idx_f
-            idx_o = idx.get('opp') if idx.get('opp') is not None else idx_o
-            nb = compare.get('nb3') or {}
-            fav_nb = nb.get('fav') or {}
-            opp_nb = nb.get('opp') or {}
-            nb_fav_no = fav_nb.get('noH2H')
-            nb_fav_h2 = fav_nb.get('h2h')
-            nb_opp_no = opp_nb.get('noH2H')
-            nb_opp_h2 = opp_nb.get('h2h')
-        except Exception:
-            pass
-
-    # Fallback to metrics
-    if ml_f is None or idx_f is None:
-        no_bt_3, with_h2h_3, log3, idx3 = fallback_metrics
-        if ml_f is None and isinstance(log3, (int, float)):
-            ml_f = log3
-        if idx_f is None and isinstance(idx3, (int, float)):
-            idx_f = idx3
-
-    def pct0(v):
-        try:
-            return f"{float(v):.0f}%"
-        except Exception:
-            return '—'
-
-    # Build aligned two-column block inside <pre> ... </pre>
-    def s(v):
-        return '' if v is None else str(v)
-    left_title = s(fav)
-    right_title = s(opp)
-    # Compact two-sided lines and center values under names, keep central bar under VS
-    # Visual width that treats emoji/symbols as double-width to stabilize alignment
-    EMO_WIDE = set('🟢🔴🟩🟥📈👤👥📊💪🏆🚩→↑↓±')
-    def width(t: str) -> int:
-        s0 = '' if t is None else str(t)
-        w = 0
-        for ch in s0:
-            code = ord(ch)
-            if ch in EMO_WIDE or 0x1F300 <= code <= 0x1FAFF:
-                w += 2
+            def esc(s: str) -> str:
+                return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
+            ts_line = f"⏱ {datetime.now().strftime('%H:%M')}" + (f" {esc(league)}" if league else "")
+            header2 = f"🏆 {esc(fav)} VS  🚩{esc(opp)}"
+            # last-10 dots: prefer per-player visualization/last10; fallback to vizDots; do NOT use H2H here
+            last10 = compare.get('last10') or {}
+            fav_dots = (last10.get('favDots') or '').strip()
+            opp_dots = (last10.get('oppDots') or '').strip()
+            if not fav_dots or not opp_dots:
+                vd = compare.get('vizDots') or {}
+                if not fav_dots:
+                    fav_dots = (vd.get('fav') or '').strip()
+                if not opp_dots:
+                    opp_dots = (vd.get('opp') or '').strip()
+            sep = '─' * 14
+            # "статистика" marker line
+            stat_title = 'статистика'
+            # H2H dots (oriented for favorite) — from dedicated last10/h2h row if present
+            h2h = (compare.get('h2hDots') or {})
+            h2h_line = (h2h.get('fav') or '').strip()
+            # Markov–BT summary
+            mbt = compare.get('mbt') or {}
+            mbt_pct = None
+            if isinstance(mbt, dict):
+                try:
+                    mbt_pct = float(mbt.get('pct')) if mbt.get('pct') is not None else None
+                except Exception:
+                    mbt_pct = None
+                top_score = mbt.get('bestScore') or '—'
             else:
-                w += 1
-        return w
-    # Keep ML marker out of table cells for alignment stability
-    def mark(v):
-        return ''
-    # Prepare raw value strings
-    val_d_f = s(d_f)
-    val_d_o = s(d_o)
-    val_nb_no_f = pct0(nb_fav_no)
-    val_nb_no_o = pct0(nb_opp_no)
-    val_nb_h2_f = pct0(nb_fav_h2)
-    val_nb_h2_o = pct0(nb_opp_h2)
-    val_ml_f = pct0(ml_f)
-    val_ml_o = pct0(ml_o)
-    mlf = mark(ml_f); mlo = mark(ml_o)
-    # Use numeric-only cells
-    val_ml_f_col = val_ml_f
-    val_ml_o_col = val_ml_o
-    val_idx_f = pct0(idx_f)
-    val_idx_o = pct0(idx_o)
-    # Last 10 games dots per player from compare.viz10 if available (fallback to last10/H2H visualization)
-    last10_fav = last10_opp = None
-    try:
-        if isinstance(compare, dict):
-            v10 = compare.get('viz10') or {}
-            let_f = v10.get('favDots') or ''
-            let_o = v10.get('oppDots') or ''
-            # fallback to previous last10 block (which might be H2H visualization)
-            if not let_f and not let_o:
-                l10 = compare.get('last10') or {}
-                let_f = l10.get('favDots') or ''
-                let_o = l10.get('oppDots') or ''
-            last10_fav = let_f if isinstance(let_f, str) and let_f else None
-            last10_opp = let_o if isinstance(let_o, str) and let_o else None
-            # Fallback: if only one side present, invert
-            if (not last10_opp) and last10_fav:
-                last10_opp = ''.join('🔴' if ch == '🟢' else ('🟢' if ch == '🔴' else ch) for ch in last10_fav)
-    except Exception:
-        pass
-    left_vals = [val_d_f, val_nb_no_f, val_nb_h2_f, val_ml_f_col, val_idx_f] + ([last10_fav] if last10_fav else [])
-    right_vals = [val_d_o, val_nb_no_o, val_nb_h2_o, val_ml_o_col, val_idx_o] + ([last10_opp] if last10_opp else [])
-    left_w = max(width(fav), max(width(v) for v in left_vals))
-    right_w = max(width(opp), max(width(v) for v in right_vals))
-    def align(text: str, w: int, mode: str = 'center') -> str:
-        txt = s(text)
-        pad = max(0, w - width(txt))
-        if mode == 'right':
-            return (' ' * pad) + txt
-        if mode == 'left':
-            return txt + (' ' * pad)
-        # center
-        left_pad = pad // 2
-        right_pad = pad - left_pad
-        return (' ' * left_pad) + txt + (' ' * right_pad)
-    # Build rows with a single central bar.
-    # Keep a fixed-width icon column so the central bar stays perfectly aligned.
-    ICONS = ['📈','👤','👥','📊','💪']
-    icon_col_w = max(width(ic) for ic in ICONS) + 1  # add one space after icon
-    def row(icon: str, lv: str, rv: str) -> str:
-        pad_after_icon = max(0, icon_col_w - (width(icon)))
-        # Right-align left column; left-align right column for stability
-        return f"{icon}{' ' * pad_after_icon}{align(lv, left_w, 'right')} | {align(rv, right_w, 'left')}"
-    pre_lines = [
-        row('📈', val_d_f, val_d_o),
-        row('👤', val_nb_no_f, val_nb_no_o),
-        row('👥', val_nb_h2_f, val_nb_h2_o),
-        row('📊', val_ml_f_col, val_ml_o_col),
-        row('💪', val_idx_f, val_idx_o),
-    ]
-    pre_block = "\n".join(pre_lines)
-
-    # Header lines (outside the table): time and player names
-    title_line = esc(f"🏆 {fav} VS  🚩{opp}")
-    # Build header time line with optional league
-    time_line = f"⏱ {ts}" + (f" {league}" if league else "")
-    parts = [
-        esc(time_line),
-        title_line,
-    ]
-    # Show last 10 games per player directly under names
-    try:
-        if isinstance(compare, dict):
-            l10 = (compare.get('last10') or {})
-            lf = last10_fav or (l10.get('favDots') or '')
-            lo = last10_opp or (l10.get('oppDots') or '')
-            if not lo and lf:
-                lo = ''.join('🔴' if ch == '🟢' else ('🟢' if ch == '🔴' else ch) for ch in lf)
-            if lf or lo:
-                parts.append(esc(f"🏆 {lf}"))
-                parts.append("──────────────")
-                parts.append(esc(f"🚩 {lo}"))
-    except Exception:
-        pass
-    # Replace <pre> block with per-line inline code cells to avoid Telegram 'копировать' header and emoji width issues
-    def pad_fixed(text, width):
-        t = '' if text is None else str(text)
-        if len(t) < width:
-            t = t + ' ' * (width - len(t))
-        return t
-    def line(icon, lv, rv, w_left, w_right):
-        return f"{icon} <code>{esc(pad_fixed(lv, w_left))}</code> | <code>{esc(pad_fixed(rv, w_right))}</code>"
-    parts.append(line('📈', val_d_f,       val_d_o,       10, 10))
-    parts.append(line('👤', val_nb_no_f,   val_nb_no_o,    4,  4))
-    parts.append(line('👥', val_nb_h2_f,   val_nb_h2_o,    4,  4))
-    parts.append(line('📊', val_ml_f_col,  val_ml_o_col,   4,  4))
-    parts.append(line('💪', val_idx_f,     val_idx_o,      4,  4))
-    # Restore H2H line relative to favorite
-    try:
-        if isinstance(compare, dict):
-            h2h = compare.get('h2hDots') or {}
-            hf = h2h.get('fav') or ''
-            sc = (h2h_score or (compare.get('h2hScore') if isinstance(compare, dict) else None)) or ''
-            if hf:
-                def shorten(s: str, n: int = 10) -> str:
-                    s = s or ''
-                    return s[-n:] if len(s) > n else s
-                parts.append(esc(f"⚔️ {shorten(hf)}" if not sc else f"⚔️ ({sc}) {shorten(hf)}"))
-    except Exception:
-        pass
-    link = esc(_canonical_stats_url(url))
-    parts.append(f"<a href=\"{link}\">Статистика</a>")
-
-    # FCI (Final Composite Index) — simplified ensemble from compare block
-    try:
-        fci_line = _compute_fci_line(compare, fav)
-        if fci_line:
-            parts.append(esc(fci_line))
-    except Exception:
-        pass
-
-    # Краткая строка: Марков–BT и Топ-счёт (по 5 играм, без H2H)
-    try:
-        mbt_line = _compute_markov_bt_line(compare)
-        if mbt_line:
-            parts.append(esc(mbt_line))
-    except Exception:
-        pass
-
-    return "\n".join(parts)
-
-
-# ---------------------- Markov + Bradley–Terry block ----------------------
-def _cleanup_tg_text(text: str) -> str:
-    """Remove unwanted verbose lines like 'Fav ...', '🎯 Фаворит:', 'Комитет', 'Базовая оценка модели'."""
-    try:
-        bad = (
-            r"^\s*Fav\b.*$",
-            r"^\s*🎯\s*Фаворит\s*:.*$",
-            r"^\s*Фаворит\s*:.*$",
-            r"^\s*Базовая\s+оценка\s+модели.*$",
-            r"^\s*Комитет.*$",
-            r"^\s*комитет.*$",
-            r"^\s*Calibr.*$",
-            r"^\s*Калибр.*$",
-        )
-        lines = [ln for ln in str(text).split("\n") if ln is not None]
-        out = []
-        for ln in lines:
-            low = ln.strip()
-            if any(re.search(p, low, flags=re.IGNORECASE) for p in bad):
-                continue
-            out.append(ln)
-        # collapse multiple blank lines
-        cleaned = []
-        prev_blank = False
-        for ln in out:
-            is_blank = (ln.strip() == '')
-            if is_blank and prev_blank:
-                continue
-            cleaned.append(ln)
-            prev_blank = is_blank
-        return "\n".join(cleaned).strip()
-    except Exception:
-        return text
-def _dots_to_wl(s: Optional[str], limit: int = 5) -> Tuple[int, int]:
-    """Convert dots string like '🟢🔴…' to (wins, losses) for last `limit` items."""
-    if not s:
-        return 0, 0
-    arr = [ch for ch in str(s) if ch in ('🟢', '🔴')][:limit]
-    w = sum(1 for ch in arr if ch == '🟢')
-    l = sum(1 for ch in arr if ch == '🔴')
-    return w, l
-
-
-def _parse_score_lr(score: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
-    if not score or not isinstance(score, str):
-        return None, None
-    m = re.search(r"(\d{1,3})\s*[:\-–—]\s*(\d{1,3})", score)
-    if not m:
-        return None, None
-    try:
-        return int(m.group(1)), int(m.group(2))
-    except Exception:
-        return None, None
-
-
-def _combine_weighted(p_h2h: Optional[float], p_form_rel: Optional[float], p_bt: Optional[float], w=(0.4, 0.3, 0.3)) -> Optional[float]:
-    parts: list[float] = []
-    weights: list[float] = []
-    for v, ww in ((p_h2h, w[0]), (p_form_rel, w[1]), (p_bt, w[2])):
-        if v is None:
-            continue
-        parts.append(float(v))
-        weights.append(float(ww))
-    if not parts:
-        return None
-    ws = sum(weights)
-    if ws <= 0:
-        return sum(parts) / len(parts)
-    return sum(v * weights[i] for i, v in enumerate(parts)) / ws
-
-
-def _markov_best_of_5(p: float) -> dict:
-    q = 1.0 - p
-    p30 = p ** 3
-    p31 = 3 * (p ** 3) * q
-    p32 = 6 * (p ** 3) * (q ** 2)
-    p03 = q ** 3
-    p13 = 3 * (q ** 3) * p
-    p23 = 6 * (q ** 3) * (p ** 2)
-    pa = p30 + p31 + p32
-    pb = p03 + p13 + p23
-    return {'3:0': p30, '3:1': p31, '3:2': p32, '0:3': p03, '1:3': p13, '2:3': p23, 'P(A)': pa, 'P(B)': pb}
-
-
-def _compute_fci_line(compare: Optional[dict], fav_name: Optional[str] = None) -> Optional[str]:
-    """Compute a simplified FCI from the compare dict and return a single-line text
-    like "<Fav> — FCI: NN%". Missing components are ignored and weights renormalized.
-    Components used (if present):
-      - base3: nb3.fav.h2h or nb3.fav.noH2H
-      - form3: idx3.fav
-      - logit3: ml3.fav
-      - mbt: last-5 wins share for fav vs opp from viz10/last10
-    """
-    if not isinstance(compare, dict):
-        return None
-    try:
-        # Percent helpers
-        def pct01(x):
+                top_score = '—'
+            if mbt_pct is not None:
+                mbt_line = f"Марков–BT {int(round(mbt_pct))}% & топ-счёт: {esc(top_score)}"
+            else:
+                mbt_line = None
+            # FCI percent if available
+            fci_pct = None
             try:
-                if x is None:
-                    return None
-                if isinstance(x, (int, float)):
-                    v = float(x)
-                    return v/100.0 if v > 1 else (v if 0 <= v <= 1 else None)
-                v = float(str(x).replace(',', '.'))
-                return v/100.0 if v > 1 else (v if 0 <= v <= 1 else None)
+                fci_pct = float(compare.get('fciPct')) if compare.get('fciPct') is not None else None
             except Exception:
-                return None
+                fci_pct = None
+            fci_line = None
+            if fci_pct is not None:
+                fci_line = f"{esc(fav)} — FCI: {fci_pct:.1f}%"
 
-        # Base3 from non-BT (prefer with H2H)
-        base3 = None
-        try:
-            nb = compare.get('nb3') or {}
-            fav_nb = nb.get('fav') or {}
-            base3 = pct01(fav_nb.get('h2h')) or pct01(fav_nb.get('noH2H'))
+            link = esc(_canonical_stats_url(url))
+            parts = [
+                esc(ts_line),
+                esc(header2),
+                '',
+                esc('🏆 ' + fav_dots) if fav_dots else '',
+                esc(sep),
+                esc('🚩 ' + opp_dots) if opp_dots else '',
+                '',
+                esc(stat_title),
+                '',
+                ('⚔️ ' + esc(h2h_line)) if h2h_line else '',
+                esc(mbt_line) if mbt_line else '',
+                esc(fci_line) if fci_line else '',
+                f"<a href=\"{link}\">Статистика</a>",
+            ]
+            # filter empty lines but keep intended blank lines by preserving '' entries we added
+            out = []
+            for s in parts:
+                if s is None:
+                    continue
+                out.append(s)
+            return "\n".join(out)
         except Exception:
-            pass
-        # Form3 from index block
-        form3 = None
-        try:
-            idx = compare.get('idx3') or {}
-            form3 = pct01(idx.get('fav'))
-        except Exception:
-            pass
-        # Logit3
-        logit3 = None
-        try:
-            ml = compare.get('ml3') or {}
-            logit3 = pct01(ml.get('fav'))
-        except Exception:
-            pass
-        # MBT from last-5 tokens (viz10 preferred, fallback to last10)
-        mbt = None
-        try:
-            fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
-            opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
-            w1, l1 = _dots_to_wl(fav_series, 5)
-            w2, l2 = _dots_to_wl(opp_series, 5)
-            p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
-            p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
-            if p1 is not None and p2 is not None and (p1 + p2) > 0:
-                mbt = p1 / (p1 + p2)
-        except Exception:
+            # fall back to old formatted table below if anything goes wrong
             pass
 
-        parts = []
-        def push(val, w):
-            if isinstance(val, (int, float)) and 0 <= val <= 1:
-                parts.append((val, w))
-        # Base weights; renormalize by available parts
-        push(base3, 0.20)
-        push(form3, 0.20)
-        push(logit3, 0.15)
-        push(mbt,   0.30)
-        if not parts:
-            return None
-        wsum = sum(w for _, w in parts) or 1.0
-        fci = sum(v * (w/wsum) for v, w in parts)
-        fci = max(0.0, min(1.0, fci))
-        name = fav_name or (compare.get('favName') if isinstance(compare.get('favName'), str) else None)
-        if name:
-            return f"{name} — FCI: {fci*100:.1f}%"
-        return f"FCI: {fci*100:.1f}%"
-    except Exception:
-        return None
+        # Old table formatting kept as fallback if above failed
+        # HTML-escape helper
+        def esc(s: str) -> str:
+            return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
+        d35 = compare.get('d35', {})
+        d_f = d35.get('fav') or '—'
+        d_o = d35.get('opp') or '—'
+        # Pull model values
+        ml = compare.get('ml3') or {}
+        idx = compare.get('idx3') or {}
+        ml_f = ml.get('fav'); ml_o = ml.get('opp')
+        idx_f = idx.get('fav'); idx_o = idx.get('opp')
+        # H2H dots (optional)
+        h2h = compare.get('h2hDots') or {}
+        h2h_f = h2h.get('fav') or ''
+        h2h_o = h2h.get('opp') or ''
 
-def _compute_markov_bt_line(compare: Optional[dict]) -> Optional[str]:
-    """Return single-line summary: 'Марков–BT XX% и Топ-счёт: S',
-    using only last 5 games of each player (no H2H)."""
-    if not isinstance(compare, dict):
-        return None
-    fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
-    opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
-    w1, l1 = _dots_to_wl(fav_series, 5)
-    w2, l2 = _dots_to_wl(opp_series, 5)
-    p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
-    p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
-    if p1 is None or p2 is None or (p1 + p2) <= 0:
-        return None
-    p = p1 / (p1 + p2)
-    p = max(0.01, min(0.99, float(p)))
-    dist = _markov_best_of_5(p)
-    pa = dist['P(A)']; pb = dist['P(B)']
-    norm_p1 = pa / (pa + pb) if (pa + pb) > 0 else p
-    best_score, _ = max({k: v for k, v in dist.items() if ':' in k}.items(), key=lambda kv: kv[1])
-    return f"Марков–BT {int(round(norm_p1*100))}% и Топ-счёт: {best_score}"
+        # Header lines (включаем полное название лиги, если удалось определить)
+        if league:
+            header = f"{esc('⏱ ' + ts)} {esc(league)}\n{esc('🏆 ' + fav + ' VS  🚩' + opp)}"
+        else:
+            header = f"{esc('⏱ ' + ts)}\n{esc('🏆 ' + fav + ' VS  🚩' + opp)}"
+
+        # Column helpers (monospace block with centered columns and '|' between)
+        def fmt_pct0(v):
+            try:
+                return f"{float(v):.0f}%"
+            except Exception:
+                return '—'
+        def ellip(s: str, w: int) -> str:
+            s = s or ''
+            return s if len(s) <= w else (s[:max(0, w-1)] + '…')
+        def center(s: str, w: int) -> str:
+            s = ellip(s, w)
+            pad = max(0, w - len(s))
+            left = pad // 2
+            right = pad - left
+            return (' ' * left) + s + (' ' * right)
+        def short_dots(s: str, n: int = 8) -> str:
+            s = s or ''
+            return s[-n:] if len(s) > n else s
+        def colorize_delta(s: str) -> str:
+            t = s or ''
+            t = t.replace('&nbsp;', ' ')
+            pos = ('+' in t) or ('↑' in t)
+            neg = ('−' in t or '-' in t) or ('↓' in t)
+            m = re.search(r"([+−\-]?\s*\d+[\.,]?\d*)\s*%", t)
+            num = m.group(1).replace(' ', '') if m else None
+            if pos and not neg:
+                return f"{num}% 🟢↑" if num else "🟢↑"
+            if neg and not pos:
+                # Replace minus sign with unicode minus for consistency
+                if num and not num.startswith('−') and num.startswith('-'):
+                    num = '−' + num[1:]
+                return f"{num}% 🔴↓" if num else "🔴↓"
+            return num + '% ↔️' if num else '↔️'
+
+        # Data values normalized
+        fav_name = esc(compare.get('favName') or fav)
+        opp_name = esc(compare.get('oppName') or opp)
+        delta_f = colorize_delta(esc(d_f))
+        delta_o = colorize_delta(esc(d_o))
+        ml_f_s  = fmt_pct0(ml_f)
+        ml_o_s  = fmt_pct0(ml_o)
+        idx_f_s = fmt_pct0(idx_f)
+        idx_o_s = fmt_pct0(idx_o)
+        h2h_f_s = short_dots(h2h_f, 8)
+        h2h_o_s = short_dots(h2h_o, 8)
+
+        # Build compact centered table
+        W = 14
+        lines = []
+        lines.append(center(fav_name, W) + ' | ' + center(opp_name, W))
+        lines.append(center('─'*min(W, 10), W) + ' | ' + center('─'*min(W, 10), W))
+        lines.append(center(delta_f, W) + ' | ' + center(delta_o, W))
+        lines.append(center(ml_f_s, W) + ' | ' + center(ml_o_s, W))
+        lines.append(center(idx_f_s, W) + ' | ' + center(idx_o_s, W))
+        if h2h_f_s or h2h_o_s:
+            lines.append(center(h2h_f_s, W) + ' | ' + center(h2h_o_s, W))
+        block = "\n".join(lines)
+
+        link = esc(_canonical_stats_url(url))
+        parts = [header]
+        parts.append(f"<pre>{block}</pre>")
+        # H2H dots and H2H score before the stats link
+        if h2h_f_s or h2h_o_s:
+            parts.append(f"⚔️ {h2h_f_s} | {h2h_o_s}")
+        if h2h_score:
+            parts.append(f"📟 {esc(h2h_score)}")
+        parts.append(f"<a href=\"{link}\">Статистика</a>")
+        return "\n".join([p for p in parts if p])
+
+    # Fallback to old format
+    no_bt_3, with_h2h_3, log3, idx3 = fallback_metrics
+    line1 = ts + (f" {league}" if league else "")
+    line2 = f"{fav} VS {opp}"
+    lstr = (f"{log3:.0f}%" if isinstance(log3, (int, float)) else "-")
+    istr = (f"{idx3:.0f}%" if isinstance(idx3, (int, float)) else "-")
+    line3 = f"{lstr} {istr}"
+    line4 = _canonical_stats_url(url)
+    return "\n".join([line1, line2, line3, line4])
 
 
-def _compute_markov_bt_block(compare: Optional[dict], fav: str, opp: str) -> Optional[str]:
-    """Markov–BT simplified: only last-5 games form for each player.
-    Ignores H2H entirely. Returns formatted text or None if not enough data."""
-    if not isinstance(compare, dict):
-        return None
-    # Prefer per-player own last results from viz10; fallback to last10
-    fav_series = ((compare.get('viz10') or {}).get('favDots')) or ((compare.get('last10') or {}).get('favDots'))
-    opp_series = ((compare.get('viz10') or {}).get('oppDots')) or ((compare.get('last10') or {}).get('oppDots'))
-
-    w1, l1 = _dots_to_wl(fav_series, 5)
-    w2, l2 = _dots_to_wl(opp_series, 5)
-    p1 = (w1 / (w1 + l1)) if (w1 + l1) > 0 else None
-    p2 = (w2 / (w2 + l2)) if (w2 + l2) > 0 else None
-    if p1 is None or p2 is None or (p1 + p2) <= 0:
-        return None
-    # Relative probability for favorite based only on last-5 win rates
-    p = p1 / (p1 + p2)
-    p = max(0.01, min(0.99, float(p)))
-    dist = _markov_best_of_5(p)
-    pa = dist['P(A)']; pb = dist['P(B)']
-    norm_p1 = pa / (pa + pb) if (pa + pb) > 0 else p
-    best_score, best_val = max({k: v for k, v in dist.items() if ':' in k}.items(), key=lambda kv: kv[1])
-    p45 = dist['3:1'] + dist['1:3'] + dist['3:2'] + dist['2:3']
-
-    def pct(x: float) -> str:
-        try:
-            return f"{x*100:.1f}%"
-        except Exception:
-            return "—"
-
-    lines = []
-    lines.append("📊 Метод Маркова–Брэдли–Терри (5 игр)")
-    lines.append(f"{fav} — {pct(norm_p1)}")
-    lines.append(f"{opp} — {pct(1.0 - norm_p1)}")
-    lines.append(f"Наиболее вероятный счёт: {best_score}")
-    lines.append(f"Вероятность 4–5 сетов: {pct(p45)}")
-    return "\n".join(lines)
-
-
-def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], output_csv: str,
-                   last10_fav: Optional[str] = None, last10_opp: Optional[str] = None,
-                   nb3_fav_no: Optional[float] = None, nb3_fav_h2: Optional[float] = None,
-                   nb3_opp_no: Optional[float] = None, nb3_opp_h2: Optional[float] = None,
-                   h2h_total: Optional[str] = None,
-                   league: Optional[str] = None) -> None:
+def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], output_csv: str, **_ignored) -> None:
     exists = os.path.exists(output_csv)
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if not exists:
-            w.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                        "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                        "last10_fav", "last10_opp", "h2h_total", "league", "url"])  # заголовки
+            w.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav", "url"])  # заголовки
         hhmmss = datetime.now().strftime("%H:%M:%S")
         no_bt_3, with_h2h_3, log3, idx3 = metrics
         w.writerow([
@@ -2345,14 +1705,6 @@ def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Option
             (f"{with_h2h_3:.1f}" if isinstance(with_h2h_3, (int, float)) else ""),
             (f"{log3:.0f}" if isinstance(log3, (int, float)) else ""),
             (f"{idx3:.0f}" if isinstance(idx3, (int, float)) else ""),
-            (f"{nb3_fav_no:.1f}" if isinstance(nb3_fav_no, (int, float)) else ""),
-            (f"{nb3_fav_h2:.1f}" if isinstance(nb3_fav_h2, (int, float)) else ""),
-            (f"{nb3_opp_no:.1f}" if isinstance(nb3_opp_no, (int, float)) else ""),
-            (f"{nb3_opp_h2:.1f}" if isinstance(nb3_opp_h2, (int, float)) else ""),
-            (last10_fav or ""),
-            (last10_opp or ""),
-            (h2h_total or ""),
-            (league or ""),
             _canonical_stats_url(url),
         ])
     # Дублируем запись в файл обратной совместимости, если сохраняем live-матчи
@@ -2362,9 +1714,7 @@ def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Option
             with open(OUTPUT_LIVE_CSV_COMPAT, "a", newline="", encoding="utf-8") as f2:
                 w2 = csv.writer(f2)
                 if not compat_exists:
-                    w2.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav",
-                                 "nb3_fav_noH2H", "nb3_fav_H2H", "nb3_opp_noH2H", "nb3_opp_H2H",
-                                 "last10_fav", "last10_opp", "h2h_total", "league", "url"])  # заголовки
+                    w2.writerow(["time", "favorite", "opponent", "noBT3_noH2H", "noBT3_H2H", "logistic3_fav", "indexP3_fav", "url"])  # заголовки
                 hhmmss = datetime.now().strftime("%H:%M:%S")
                 no_bt_3, with_h2h_3, log3, idx3 = metrics
                 w2.writerow([
@@ -2375,14 +1725,6 @@ def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Option
                     (f"{with_h2h_3:.1f}" if isinstance(with_h2h_3, (int, float)) else ""),
                     (f"{log3:.0f}" if isinstance(log3, (int, float)) else ""),
                     (f"{idx3:.0f}" if isinstance(idx3, (int, float)) else ""),
-                    (f"{nb3_fav_no:.1f}" if isinstance(nb3_fav_no, (int, float)) else ""),
-                    (f"{nb3_fav_h2:.1f}" if isinstance(nb3_fav_h2, (int, float)) else ""),
-                    (f"{nb3_opp_no:.1f}" if isinstance(nb3_opp_no, (int, float)) else ""),
-                    (f"{nb3_opp_h2:.1f}" if isinstance(nb3_opp_h2, (int, float)) else ""),
-                    (last10_fav or ""),
-                    (last10_opp or ""),
-                    (h2h_total or ""),
-                    (league or ""),
                     _canonical_stats_url(url),
                 ])
         except Exception as e:

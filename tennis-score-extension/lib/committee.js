@@ -35,6 +35,15 @@
     return { R, K };
   }
 
+  function mean(arr){ if(!arr||!arr.length) return 0; return arr.reduce((a,b)=>a+b,0)/arr.length; }
+  function stddev01(arr){
+    const xs = (arr||[]).map(v=>clamp01(v));
+    if (!xs.length) return 0;
+    const m = mean(xs);
+    const v = xs.reduce((s,x)=>s + (x-m)*(x-m), 0) / xs.length;
+    return Math.sqrt(Math.max(0,v));
+  }
+
   function valueScore(pCal, q, U){ return (clamp01(pCal) - clamp01(q)) * clamp01(U); }
 
   // 6) Bootstrap uncertainty — approximate using beta resampling around each input
@@ -103,20 +112,24 @@
     const probs = [pScore, pBT, pH2H, pExt].map(x=>clamp01(x));
     const committee = committeeProb(probs[0], probs[1], probs[2], probs[3], O.W);
     const pCal = calibrate(committee, O.T);
+    // Disagreement penalty: shrink probability toward 0.5 when models diverge
+    const s = stddev01(probs); // 0..~0.5
+    const varPenalty = 1 - Math.min(s / 0.25, 1); // 1 (agree) -> 0 (high disagreement)
+    const pAdj = 0.5 + (pCal - 0.5) * varPenalty;
     const {R,K} = consensusStats(probs);
     const sigmaHat = (O.sigmaHat!=null) ? O.sigmaHat : sigmaBootstrap(probs[0], probs[1], probs[2], probs[3], O.W, O.T, O.nBoot, O.nEff);
     const U = clamp01(K) * (1 - clamp01(R)) * (1 - clamp01(sigmaHat));
-    const value = valueScore(pCal, q, U);
+    const value = valueScore(pAdj, q, U);
 
     // Sign conflict rule (BT vs Score)
     const signConflict = ((pBT-0.5)*(pScore-0.5) < 0) && (Math.abs(pBT - pScore) >= 0.12);
 
     // Hard thresholds
     if (R>0.25 || K<0.55 || sigmaHat>0.07 || signConflict) {
-      return { verdict: 'NO BET', p: pCal, value, K, R, U, sigmaHat, details:{signConflict} };
+      return { verdict: 'NO BET', p: pAdj, value, K, R, U, sigmaHat, details:{signConflict, varPenalty} };
     }
     if (R>0.15 || K<0.68) {
-      return { verdict: 'LEAN', p: pCal, value, K, R, U, sigmaHat, details:{signConflict} };
+      return { verdict: 'LEAN', p: pAdj, value, K, R, U, sigmaHat, details:{signConflict, varPenalty} };
     }
 
     // Bet with color by Value
@@ -124,7 +137,7 @@
     if (value <= 0) color = 'RED';
     else if (value >= 0.03) color = 'GREEN';
 
-    return { verdict: 'BET', color, p: pCal, value, K, R, U, sigmaHat, details:{signConflict} };
+    return { verdict: 'BET', color, p: pAdj, value, K, R, U, sigmaHat, details:{signConflict, varPenalty} };
   }
 
   // Confidence metric for UI
@@ -137,4 +150,3 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else global.Committee = api;
 })(typeof window !== 'undefined' ? window : globalThis);
-

@@ -284,6 +284,10 @@ function renderFavOppCompare(payload) {
       <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;">
         <div style="padding:8px 10px;font-weight:700;">${payload?.favName || 'Фаворит'} — FCI: ${Math.round(payload.fciFavPct)}%</div>
       </div>` : '';
+  const committeeRow = (typeof payload?.committeePct === 'number') ? `
+      <div class="cmp-row committee" style="display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;font-weight:700;">${payload?.favName || 'Фаворит'} — Комитет (калибр.): ${Math.round(payload.committeePct)}%</div>
+      </div>` : '';
 
   return `
     <div class="min2-compare" style="margin-top:8px;background:#fff;color:#222;border:1px solid #e6e6e6;border-radius:10px;overflow:hidden;font:500 13px/1.4 system-ui;">
@@ -292,6 +296,7 @@ function renderFavOppCompare(payload) {
         <div style="padding:8px 10px;font-weight:600;border-left:1px solid #eee;">${oppHdr}</div>
       </div>
       ${fciRow}
+      ${committeeRow}
       <div class="cmp-row nb3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
         <div class="fav nb3" style="padding:8px 10px;">${favNb}</div>
         <div class="opp nb3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppNb}</div>
@@ -1083,9 +1088,31 @@ function renderFavOppCompare(payload) {
       const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
       FCI_ins = { FCI: proxy, verdict: '', color: '#111827' };
     }
+    // Committee probability (calibrated forecast/pred), oriented to favorite
+    // Committee (calibrated) percent for favorite (0..1). Try several sources.
+    let committeeFav = null;
+    try {
+      const pA_fore01 = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+      const pB_fore01 = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+      const v = favIsA ? pA_fore01 : (pB_fore01!=null? (1-pB_fore01) : null);
+      if (typeof v === 'number' && isFinite(v)) committeeFav = v;
+    } catch(_) {}
+    // Fallback: parse from summary line if present (inserted by popup override)
+    if (committeeFav == null) {
+      try {
+        const sv = document.getElementById('summaryFav');
+        const txt = sv ? (sv.innerText || sv.textContent || '') : '';
+        const m = String(txt).match(/Комитет\s*\(калибр\.\)\s*:\s*(\d{1,3})%/i);
+        if (m) {
+          const vv = Number(m[1])/100; if (isFinite(vv)) committeeFav = vv;
+        }
+      } catch(_) {}
+    }
+
     const cmpPayload_dec2 = {
       ...cmpPayload_dec,
       fciFavPct: Math.round((FCI_ins.FCI||0)*100),
+      committeePct: (committeeFav!=null ? Math.round(committeeFav*100) : undefined),
       hmProb: hmRes ? Math.round((hmRes.p_match||0)*100) : undefined,
       hmTop: hmRes ? (hmRes.topScore||undefined) : undefined,
       hmP2sets: hmRes ? Math.round((hmRes.p_2sets||0)*100) : undefined
@@ -1105,50 +1132,67 @@ function renderFavOppCompare(payload) {
         document.body.insertBefore(holder, document.body.firstChild);
       }
     }
-    // Compute FCI block (use function declaration so it's hoisted)
-    function computeFCI(data, ctx) {
-      try {
-        const to01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x)) : null);
-        const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
-        const base3 = pctTo01(ctx.base3);
-        const form3 = pctTo01(ctx.idxFav3);
-        const logit3 = pctTo01(ctx.mlFav3);
-        const arr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null).slice(0,5);
-        const f5 = arr(ctx.visFavTokens);
-        const o5 = arr(ctx.visOppTokens);
-        const p1 = f5.length? f5.reduce((a,b)=>a+b,0)/f5.length : null;
-        const p2 = o5.length? o5.reduce((a,b)=>a+b,0)/o5.length : null;
-        const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
-        const pA_fore = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
-        const pB_fore = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
-        const committee = to01(ctx.favIsA ? pA_fore : (pB_fore!=null? (1-pB_fore) : null));
-        const stability = (function(){
-          const sA = typeof data?.playerA?.stability==='number' ? data.playerA.stability : null;
-          const sB = typeof data?.playerB?.stability==='number' ? data.playerB.stability : null;
-          return ctx.favIsA ? sA : sB;
-        })();
-        const parts = [];
-        const push = (v,w)=>{ if (v!=null && isFinite(v)) parts.push([v,w]); };
-        push(base3, 0.20); push(form3, 0.20); push(logit3, 0.15); push(mbt, 0.30); push(committee, 0.10); push(stability, 0.05);
-        if (parts.length === 0) return null;
-        let wsum = parts.reduce((s,[_v,w])=>s+w,0) || 1;
-        let FCI = parts.reduce((s,[v,w])=> s + v*(w/wsum), 0);
-        const d5_10 = (typeof ctx.d5_10==='number') ? ctx.d5_10/100 : null;
-        const d3_5  = (typeof ctx.d3_5 ==='number') ? ctx.d3_5 /100 : null;
-        if (d5_10!=null && d5_10 < -0.05) FCI -= 0.05;
-        if (logit3!=null && logit3 < 0.5) FCI -= 0.07;
-        if (d3_5!=null && d3_5 > 0) FCI += 0.02;
-        const Kstab = (typeof stability==='number' && (stability*100) < 80) ? 0.95 : 1.00;
-        FCI = Math.max(0, Math.min(1, FCI * Kstab));
-        let verdict = 'Равные шансы'; let color='#9ca3af';
-        if (FCI >= 0.75){ verdict='Сильный фаворит'; color='#16a34a'; }
-        else if (FCI >= 0.60){ verdict='Умеренный фаворит'; color='#f59e0b'; }
-        else if (FCI >= 0.50){ verdict='Равные шансы'; color='#9ca3af'; }
-        else if (FCI >= 0.35){ verdict='Рискованный аутсайдер'; color='#f97316'; }
+    // Compute FCI (improved): consensus-focused, low correlation with Committee
+    function computeFCI_improved(data, ctx){
+      try{
+        const to01 = (x)=> (typeof x==='number' && isFinite(x)? Math.max(0,Math.min(1,x)) : null);
+        const pct01 = (x)=> (typeof x==='number' && isFinite(x)? Math.max(0,Math.min(1,x/100)) : null);
+        const favIsA = !!ctx.favIsA;
+        // Helper: collect model probs for window w
+        function modelsFor(w){
+          const arr = [];
+          // non-BT probabilities per window
+          try{
+            const pA = pct01(w===3? data?.playerA?.nonBTProbability3 : (w===5? data?.playerA?.nonBTProbability5 : (data?.playerA?.nonBTProbability10 ?? data?.playerA?.nonBTProbability)));
+            const pB = pct01(w===3? data?.playerB?.nonBTProbability3 : (w===5? data?.playerB?.nonBTProbability5 : (data?.playerB?.nonBTProbability10 ?? data?.playerB?.nonBTProbability)));
+            const p = favIsA? pA : pB;
+            if (p!=null) arr.push(p);
+          }catch(_){ }
+          // logistic window (only have N=3 reliably)
+          if (w===3){
+            const log3 = pct01(ctx.mlFav3);
+            if (log3!=null) arr.push(log3);
+            const idx3 = pct01(ctx.idxFav3);
+            if (idx3!=null) arr.push(idx3);
+          }
+          return arr;
+        }
+        function fciWindow(list){
+          const xs = list.filter(v=>v!=null && isFinite(v));
+          if (!xs.length) return null;
+          const mean = xs.reduce((a,b)=>a+b,0)/xs.length;
+          const std  = Math.sqrt(xs.reduce((s,x)=> s + (x-mean)*(x-mean), 0)/xs.length);
+          const sign = mean - 0.5;
+          const agree = 1 - Math.min(std/0.25, 1);
+          return Math.max(0, Math.min(1, agree * (0.5 + 2*Math.abs(sign))));
+        }
+        const f3 = fciWindow(modelsFor(3));
+        const f5 = fciWindow(modelsFor(5));
+        const f10 = fciWindow(modelsFor(10));
+        let FCI = 0;
+        if (f3!=null) FCI += 0.6 * f3;
+        if (f5!=null) FCI += 0.3 * f5;
+        if (f10!=null) FCI += 0.1 * f10;
+        // Stability context
+        const sA = to01(data?.playerA?.stability);
+        const sB = to01(data?.playerB?.stability);
+        if (sA!=null && sB!=null){
+          const A = sA, B = sB;
+          if (A>0.85 && B>0.85 && Math.abs(A-B) < 0.10) FCI += 0.05;
+          else if (Math.min(A,B) < 0.70) FCI -= 0.05;
+        }
+        FCI = Math.max(0, Math.min(1, FCI));
+        let verdict='Равные шансы', color='#9ca3af';
+        if (FCI >= 0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
+        else if (FCI >= 0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
+        else if (FCI >= 0.55){ verdict='50/50'; color='#9ca3af'; }
+        else if (FCI >= 0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
         else { verdict='Слабый игрок'; color='#ef4444'; }
         return { FCI, verdict, color };
-      } catch(_) { return null; }
+      }catch(_){ return null; }
     }
+    // Backward-compatible name used below
+    function computeFCI(data, ctx){ return computeFCI_improved(data, ctx); }
 
     // Hybrid Markov based on point differences across recent matches
     function computeHybridMarkov(recFav, recOpp, k = 7) {
@@ -1499,60 +1543,7 @@ function renderFavOppCompare(payload) {
     const htmlCmp_ins2 = renderFavOppCompare(cmpPayload_ins2);
 
     // FCI v2.0 block for this insertion path
-    const computeFCI_local = (data, ctx) => {
-      try {
-        const to01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x)) : null);
-        const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
-        const base3 = pctTo01(ctx.base3);
-        const form3 = pctTo01(ctx.idxFav3);
-        const logit3 = pctTo01(ctx.mlFav3);
-        const arr = (s)=> String(s||'').trim().split(/\s+/).filter(Boolean).map(t=>t==='🟢'?1:(t==='🔴'?0:null)).filter(v=>v!=null).slice(0,5);
-        const f5 = arr(ctx.visFavTokens);
-        const o5 = arr(ctx.visOppTokens);
-        const p1 = f5.length? f5.reduce((a,b)=>a+b,0)/f5.length : null;
-        const p2 = o5.length? o5.reduce((a,b)=>a+b,0)/o5.length : null;
-        const mbt = (p1!=null && p2!=null && (p1+p2)>0) ? (p1/(p1+p2)) : null;
-        const pA_fore = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
-        const pB_fore = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
-        const committee = to01(ctx.favIsA ? pA_fore : (pB_fore!=null? (1-pB_fore) : null));
-        const stability = (function(){
-          const sA = typeof data?.playerA?.stability==='number' ? data.playerA.stability : null;
-          const sB = typeof data?.playerB?.stability==='number' ? data.playerB.stability : null;
-          return ctx.favIsA ? sA : sB;
-        })();
-        // base weights
-        let w = { base:0.20, form:0.20, logit:0.15, mbt:0.30, committee:0.10, stab:0.05 };
-        // adaptations
-        if (typeof ctx.d5_10==='number' && ctx.d5_10 < -5) w.base = 0.15;
-        if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
-        if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
-        if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
-        // compose (renormalize available)
-        const parts = [];
-        const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
-        push(base3, w.base); push(form3, w.form); push(logit3, w.logit); push(mbt, w.mbt); push(committee, w.committee); push(stability, w.stab);
-        let wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
-        let FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
-        // bonuses/penalties
-        let bonus = 0;
-        const d5_10p = (typeof ctx.d5_10==='number') ? ctx.d5_10/100 : null;
-        const d3_5p  = (typeof ctx.d3_5 ==='number') ? ctx.d3_5 /100 : null;
-        if (d3_5p!=null && d3_5p > 0) bonus += 0.02;
-        if (d3_5p!=null && d3_5p < -0.05) bonus -= 0.03;
-        if (d5_10p!=null && d5_10p < -0.05) bonus -= 0.05;
-        const stabPct = (function(){ const s = stability; return (typeof s==='number') ? (s*100) : null; })();
-        if (stabPct!=null && stabPct >= 90) bonus += 0.01;
-        if (stabPct!=null && stabPct < 80) bonus -= 0.02;
-        FCI = Math.max(0, Math.min(1, FCI + bonus));
-        let verdict = 'Равные шансы'; let color='#9ca3af';
-        if (FCI >= 0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
-        else if (FCI >= 0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
-        else if (FCI >= 0.55){ verdict='50/50'; color='#9ca3af'; }
-        else if (FCI >= 0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
-        else { verdict='Слабый игрок'; color='#ef4444'; }
-        return { FCI, verdict, color };
-      } catch(_) { return null; }
-    };
+    const computeFCI_local = (data, ctx) => { try { return computeFCI_improved(data, ctx); } catch(_) { return null; } };
 
     const fciCtx2 = {
       favIsA,
@@ -1711,44 +1702,19 @@ function ensureFCIInline() {
     if (typeof form3==='number' && form3 > 0.65) w.form = 0.25;
     if (typeof logit3==='number' && logit3 < 0.5) w.logit = 0.10;
     if (typeof form3==='number' && typeof logit3==='number' && form3 > 0.6 && logit3 > 0.55) w.mbt = 0.35;
-    const parts = [];
-    const push = (v,wv)=>{ if (v!=null && isFinite(v)) parts.push([v,wv]); };
-    push(base3, w.base); push(form3, w.form); push(logit3, w.logit); push(mbt, w.mbt); push(committee, w.committee); push(stability, w.stab);
-    if (!parts.length) {
-      // As a last resort, render a placeholder and schedule another attempt
-      const node = document.createElement('div');
-      node.id = 'tsx-fci-inline';
-      node.className = 'cmp-row fci';
-      node.setAttribute('style', 'display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin-bottom:6px;');
-      node.innerHTML = `<div style="padding:8px 10px;font-weight:700;color:#9ca3af;">FCI: —</div>`;
-      anchor.parentNode.insertBefore(node, anchor);
-      scheduleRetry();
-      return;
-    }
-    const wsum = parts.reduce((s,[_v,wv])=>s+wv,0) || 1;
-    let FCI = parts.reduce((s,[v,wv])=> s + v*(wv/wsum), 0);
-    // Bonuses/penalties
-    const d5_10p = (typeof fav10.d5_10==='number') ? fav10.d5_10/100 : null;
-    const d3_5p  = (typeof fav10.d3_5 ==='number') ? fav10.d3_5 /100 : null;
-    if (d3_5p!=null && d3_5p > 0) FCI += 0.02;
-    if (d3_5p!=null && d3_5p < -0.05) FCI -= 0.03;
-    if (d5_10p!=null && d5_10p < -0.05) FCI -= 0.05;
-    const stabPct = (typeof stability==='number') ? (stability*100) : null;
-    if (stabPct!=null && stabPct >= 90) FCI += 0.01;
-    if (stabPct!=null && stabPct < 80) FCI -= 0.02;
-    FCI = Math.max(0, Math.min(1, FCI));
-    let verdict='Равные шансы', color='#9ca3af';
-    if (FCI >= 0.80){ verdict='Уверенный фаворит'; color='#16a34a'; }
-    else if (FCI >= 0.65){ verdict='Фаворит с риском'; color='#f59e0b'; }
-    else if (FCI >= 0.55){ verdict='50/50'; color='#9ca3af'; }
-    else if (FCI >= 0.40){ verdict='Аутсайдер, но борется'; color='#f97316'; }
-    else { verdict='Слабый игрок'; color='#ef4444'; }
-
+    // Use improved consensus calculator and render once
+    const res = computeFCI_improved(data, {
+      favIsA,
+      mlFav3: (function(){ const v=favIsA? pA3_win : pB3_win; return Number.isFinite(v)? v : undefined; })(),
+      idxFav3: fav10.p3
+    });
     const node = document.createElement('div');
     node.id = 'tsx-fci-inline';
     node.className = 'cmp-row fci';
     node.setAttribute('style', 'display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;margin-bottom:6px;');
-    node.innerHTML = `<div style="padding:8px 10px;font-weight:700;color:${color};">FCI: ${(FCI*100).toFixed(1)}%</div>`;
+    const color = res?.color || '#9ca3af';
+    const val = (res && typeof res.FCI==='number') ? (res.FCI*100).toFixed(1) + '%' : '—';
+    node.innerHTML = `<div style=\"padding:8px 10px;font-weight:700;color:${color};\">FCI: ${val}</div>`;
     anchor.parentNode.insertBefore(node, anchor);
   } catch(_) {}
 }
