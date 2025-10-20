@@ -24,7 +24,7 @@ import re
 import csv
 from datetime import datetime
 from urllib.parse import urljoin, urlparse, parse_qs, urlunparse, parse_qsl, quote, unquote
-from typing import List, Optional, Tuple, Set
+from typing import List, Optional, Tuple, Set, Dict
 from urllib import request as _urlrequest, parse as _urlparse
 import threading
 import time
@@ -81,6 +81,7 @@ _SCAN_LOCK = threading.Lock()
 
 # Глобальный список известных лиг (собираем с live_v2 и переиспользуем на странице статистики)
 _KNOWN_LEAGUES: List[str] = []
+_LEAGUE_BY_URL: Dict[str, str] = {}
 
 
 CONTROL_JS = r"""
@@ -806,6 +807,9 @@ def collect_filtered_stats_links(page) -> List[str]:
             row_text = a.evaluate(
                 r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim().toLowerCase(); }"
             ) or ""
+            row_text_full = a.evaluate(
+                r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim(); }"
+            ) or ""
             # Эвристика LIVE: присутствуют признаки счёта/процесса
             has_score = bool(re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", row_text))
             live_markers = ("лайв" in row_text) or ("live" in row_text) or ("идет" in row_text) or ("идёт" in row_text) or ("сет" in row_text)
@@ -823,6 +827,16 @@ def collect_filtered_stats_links(page) -> List[str]:
                 continue
             seen.add(abs_url)
             hrefs.append(abs_url)
+            # Try to attach league name for this URL using known leagues
+            try:
+                if _KNOWN_LEAGUES and row_text_full:
+                    # choose the longest matching league name to avoid partials
+                    for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
+                        if name and name in row_text_full:
+                            _LEAGUE_BY_URL[abs_url] = name
+                            break
+            except Exception:
+                pass
         except Exception:
             continue
     return hrefs
@@ -1060,6 +1074,12 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                             league = _extract_league_name(page)
                         except Exception:
                             league = None
+                        # Fallback: use league captured on live list for this URL
+                        if not league:
+                            try:
+                                league = _LEAGUE_BY_URL.get(url)
+                            except Exception:
+                                pass
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, h2h_score, league=league)
                         _TG_SENDER(msg)
                 except Exception:
