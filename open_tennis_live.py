@@ -78,6 +78,8 @@ DEFAULT_FILTERS = [
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
 _SCAN_LOCK = threading.Lock()
+# Разрешить отправку всех матчей (игнорировать GO/3/3/2/3), но сохранять фильтр турниров
+ALLOW_NOTIFY_ALL = False
 
 # Глобальный список известных лиг (собираем с live_v2 и переиспользуем на странице статистики)
 _KNOWN_LEAGUES: List[str] = []
@@ -375,6 +377,14 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
+        # Отправлять все матчи, но оставляя турнирный фильтр
+        try:
+            if getattr(args, 'notify_all', False) or (os.getenv('AUTOBET_NOTIFY_ALL') not in (None, '', '0', 'false', 'False')):
+                global ALLOW_NOTIFY_ALL
+                ALLOW_NOTIFY_ALL = True
+        except Exception:
+            pass
+
         # Подгружаем известные лиги с диска (если есть сохранённый список)
         _load_known_leagues_from_disk()
 
@@ -585,6 +595,13 @@ def run(filters: List[str]) -> None:
             bg_minutes = 30
         if interval_sec is None:
             interval_sec = 60
+        # Предохраняемся от слишком частых пересканов (0 секунд)
+        try:
+            if float(interval_sec) < 10:
+                print(f"[bg] Предупреждение: слишком маленький интервал ({interval_sec}s). Ставлю минимум 10s, чтобы страница успевала обновляться.")
+                interval_sec = 10
+        except Exception:
+            interval_sec = 10
 
         print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
         deadline = time.monotonic() + bg_minutes * 60
@@ -687,6 +704,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Режим: сохранять и отправлять ВСЕ матчи, игнорируя условие GO/3/3/2/3; также отключает фильтр турниров
     parser.add_argument("-all", "--all", dest="all", action="store_true",
                         help="Парсить все матчи (без условия GO/3/3/2/3) и отправлять все страницы статистики. Отключает фильтрацию по турнирам.")
+    # Отправлять все матчи, но без снятия фильтра турниров (в отличие от --all)
+    parser.add_argument("--notify-all", dest="notify_all", action="store_true",
+                        help="Отправлять все найденные страницы статистики (игнорировать GO/3/3/2/3), но сохранять фильтр по турнирам")
     # Жёсткая перезагрузка live-страницы перед каждым циклом сканирования
     parser.add_argument("--reload", dest="reload", action="store_true",
                         help="Перезагружать live_v2 перед каждым фоновым циклом (на случай если список не обновляется)")
@@ -1106,7 +1126,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 except Exception:
                     pass
                 fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
-            if fav and opp and (reason or ALLOW_ALL):
+            if fav and opp and (reason or ALLOW_ALL or ALLOW_NOTIFY_ALL):
                 # Извлечь метрики для новой строки CSV
                 metrics = _extract_metrics_for_csv(page, fav, opp)
                 save_match_row(url, fav, opp, metrics, output_csv)
