@@ -144,6 +144,7 @@ CONTROL_JS = r"""
 FILTER_JS = r"""
 (() => {
   const ALLOWED = new Set(%(allowed)s);
+  const EXCLUDED = new Set(%(excluded)s);
 
   const styleId = '__auto_filter_style__';
   if (!document.getElementById(styleId)) {
@@ -167,8 +168,9 @@ FILTER_JS = r"""
       badge = document.createElement('div');
       badge.className = '__auto-filter-badge__';
       badge.title = 'Автофильтр применён к списку матчей';
-      const list = Array.from(ALLOWED).map(s => `<code>${s}</code>`).join(', ');
-      badge.innerHTML = `Фильтр турниров активен: ${list}`;
+      const listA = Array.from(ALLOWED).map(s => `<code>${s}</code>`).join(', ') || 'все';
+      const listE = Array.from(EXCLUDED).map(s => `<code>${s}</code>`).join(', ');
+      badge.innerHTML = `Фильтр: ${listA}` + (listE ? `<br>Исключено: ${listE}` : '');
       document.body.appendChild(badge);
     }
     return badge;
@@ -191,8 +193,10 @@ FILTER_JS = r"""
         if (!cells.length) return;
         const cell = cells[idx] || cells[cells.length - 1];
         const txt = (cell && cell.textContent) ? cell.textContent.trim() : tr.textContent.trim();
-        const match = Array.from(ALLOWED).some(s => txt.includes(s));
-        tr.classList.toggle('__auto-filter-hidden__', !match);
+        const blocked = Array.from(EXCLUDED).some(s => txt.includes(s));
+        const allowed = (ALLOWED.size ? Array.from(ALLOWED).some(s => txt.includes(s)) : true);
+        const show = allowed && !blocked;
+        tr.classList.toggle('__auto-filter-hidden__', !show);
       });
     });
   }
@@ -205,8 +209,10 @@ FILTER_JS = r"""
     candidates.forEach(el => {
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!text) return;
-      const match = Array.from(ALLOWED).some(s => text.includes(s));
-      el.classList.toggle('__auto-filter-hidden__', !match);
+      const blocked = Array.from(EXCLUDED).some(s => text.includes(s));
+      const allowed = (ALLOWED.size ? Array.from(ALLOWED).some(s => text.includes(s)) : true);
+      const show = allowed && !blocked;
+      el.classList.toggle('__auto-filter-hidden__', !show);
     });
   }
 
@@ -476,7 +482,19 @@ def run(filters: List[str]) -> None:
             print("[login] Предупреждение: не удалось войти. Продолжаю без авторизации.")
 
         allowed_js = json.dumps(filters, ensure_ascii=False)
-        page.evaluate(FILTER_JS % {"allowed": allowed_js})
+        # Prepare excluded leagues list from args/env
+        try:
+            excluded = getattr(args, 'exclude', None)
+        except Exception:
+            excluded = None
+        if not excluded:
+            ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+            if ex_env:
+                excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
+        excluded = excluded or []
+        excluded_js = json.dumps(excluded, ensure_ascii=False)
+
+        page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
         # Обновим список лиг с текущей страницы
         try:
             _update_known_leagues_from_page(page)
@@ -567,6 +585,31 @@ def run(filters: List[str]) -> None:
                 except Exception:
                     pass
                 try:
+                    # По запросу — полная перезагрузка live_v2 перед каждым сканом
+                    do_reload = False
+                    try:
+                        do_reload = getattr(args, 'reload', False)
+                    except Exception:
+                        do_reload = False
+                    if not do_reload and os.getenv('AUTOBET_RELOAD'):
+                        do_reload = True
+                    if do_reload:
+                        try:
+                            page.goto(URL, wait_until="domcontentloaded", timeout=20000)
+                            # Переинъекция фильтра после reload
+                            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+                            try:
+                                excl = getattr(args, 'exclude', None)
+                            except Exception:
+                                excl = None
+                            if not excl:
+                                ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                                if ex_env:
+                                    excl = [s.strip() for s in ex_env.split(',') if s.strip()]
+                            excluded_js = json.dumps(excl or [], ensure_ascii=False)
+                            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+                        except Exception as e:
+                            print(f"[bg] warn: reload failed: {e}")
                     restart_scan(context, page, filters, stop_event)
                 except Exception as e:
                     print(f"[bg] ошибка цикла: {e}")
@@ -606,6 +649,8 @@ def main() -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Open tennis live page with auto-filter and login")
     parser.add_argument("filters", nargs="*", help="Список строк для фильтрации по колонке 'Турнир'")
+    parser.add_argument("--exclude", dest="exclude", nargs="*",
+                        help="Исключить турниры (подстроки). Можно также через переменную AUTOBET_EXCLUDE=\"A,B,C\"")
     parser.add_argument("--email", dest="email", help="Email для авторизации (иначе TENNIS_EMAIL или значение по умолчанию)")
     parser.add_argument("--password", dest="password", help="Пароль для авторизации (иначе TENNIS_PASSWORD или значение по умолчанию)")
     parser.add_argument(
@@ -632,6 +677,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Режим: сохранять и отправлять ВСЕ матчи, игнорируя условие GO/3/3/2/3; также отключает фильтр турниров
     parser.add_argument("-all", "--all", dest="all", action="store_true",
                         help="Парсить все матчи (без условия GO/3/3/2/3) и отправлять все страницы статистики. Отключает фильтрацию по турнирам.")
+    # Жёсткая перезагрузка live-страницы перед каждым циклом сканирования
+    parser.add_argument("--reload", dest="reload", action="store_true",
+                        help="Перезагружать live_v2 перед каждым фоновым циклом (на случай если список не обновляется)")
     return parser
 
 
@@ -2002,7 +2050,18 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                     pass
                 try:
                     allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
-                    up.evaluate(FILTER_JS % {"allowed": allowed_js})
+                    # reuse excluded from main args/env
+                    try:
+                        args = parse_args_for_runtime()
+                        excluded = getattr(args, 'exclude', None)
+                    except Exception:
+                        excluded = None
+                    if not excluded:
+                        ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                        if ex_env:
+                            excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
+                    excluded_js = json.dumps(excluded or [], ensure_ascii=False)
+                    up.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
                 except Exception:
                     pass
                 up.wait_for_timeout(800)
