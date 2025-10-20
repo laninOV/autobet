@@ -47,6 +47,7 @@ OUTPUT_LIVE_CSV_COMPAT = os.path.join(_HERE, "live_3of3.csv")
 OUTPUT_PREMA_CSV = os.path.join(_HERE, "prema_3of3.csv")
 PROCESSED_LIVE_JSON = os.path.join(_HERE, "processed_live_urls.json")
 PROCESSED_PREMA_JSON = os.path.join(_HERE, "processed_prema_urls.json")
+KNOWN_LEAGUES_JSON = os.path.join(_HERE, "known_leagues.json")
 FONBET_URL = "https://fon.bet/live/table-tennis"
 FONBET_LOGIN_DEFAULT = "+7 916 261-82-40"
 FONBET_PASSWORD_DEFAULT = "zxascvdf2Z!"
@@ -77,6 +78,9 @@ DEFAULT_FILTERS = [
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
 _SCAN_LOCK = threading.Lock()
+
+# Глобальный список известных лиг (собираем с live_v2 и переиспользуем на странице статистики)
+_KNOWN_LEAGUES: List[str] = []
 
 
 CONTROL_JS = r"""
@@ -264,6 +268,63 @@ def _init_output_files():
     except Exception as e:
         print(f"[init] error: cannot create {OUTPUT_LIVE_CSV_COMPAT}: {e}")
 
+    # Не очищаем KNOWN_LEAGUES_JSON: он накапливается между запусками.
+
+
+def _update_known_leagues_from_page(page) -> None:
+    """Читает список лиг с live_v2 из выпадающего списка и сохраняет локально.
+    Данные сохраняются в глобальную переменную и в файл known_leagues.json.
+    """
+    global _KNOWN_LEAGUES
+    try:
+        leagues = page.evaluate(
+            """
+            () => {
+              const sel = document.querySelector('#tourney-select');
+              if (!sel) return [];
+              const opts = Array.from(sel.querySelectorAll('option'))
+                .map(o => (o.textContent||'').trim())
+                .filter(Boolean);
+              // Удалим служебный пункт "Все турниры"
+              return opts.filter(t => !/^все\s+турниры$/i.test(t));
+            }
+            """,
+        ) or []
+        if isinstance(leagues, list):
+            # Нормализуем и обновим глобальный список без дублей, сохраним порядок
+            seen = set()
+            merged: List[str] = []
+            for s in (leagues + _KNOWN_LEAGUES):
+                if not isinstance(s, str):
+                    continue
+                t = s.strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                merged.append(t)
+            _KNOWN_LEAGUES = merged
+            # Сохраним на диск для последующих запусков
+            try:
+                with open(KNOWN_LEAGUES_JSON, 'w', encoding='utf-8') as fh:
+                    json.dump(_KNOWN_LEAGUES, fh, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            print(f"[leagues] обновлено: {len(_KNOWN_LEAGUES)} шт.")
+    except Exception as e:
+        print(f"[leagues] warn: не удалось прочитать список лиг: {e}")
+
+
+def _load_known_leagues_from_disk() -> None:
+    global _KNOWN_LEAGUES
+    try:
+        if os.path.exists(KNOWN_LEAGUES_JSON):
+            with open(KNOWN_LEAGUES_JSON, 'r', encoding='utf-8') as fh:
+                lst = json.load(fh)
+            if isinstance(lst, list):
+                _KNOWN_LEAGUES = [str(s).strip() for s in lst if isinstance(s, str) and str(s).strip()]
+    except Exception:
+        pass
+
 
 def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
@@ -296,6 +357,9 @@ def run(filters: List[str]) -> None:
                 ALLOW_ALL = True
         except Exception:
             pass
+
+        # Подгружаем известные лиги с диска (если есть сохранённый список)
+        _load_known_leagues_from_disk()
 
         # Setup Telegram sender if requested
         try:
@@ -412,6 +476,11 @@ def run(filters: List[str]) -> None:
 
         allowed_js = json.dumps(filters, ensure_ascii=False)
         page.evaluate(FILTER_JS % {"allowed": allowed_js})
+        # Обновим список лиг с текущей страницы
+        try:
+            _update_known_leagues_from_page(page)
+        except Exception:
+            pass
 
         # Логи консоли страницы: по умолчанию показываем только наши сообщения с префиксом 'AUTO:'
         if not getattr(args, 'headless', False):
@@ -1327,9 +1396,17 @@ def _extract_compare_block(page) -> Optional[dict]:
               const rFav = readDots(favLastEl);
               const rOpp = readDots(oppLastEl);
               // Additional fallback: visualization row tokens per player
-              const onlyDots = (s)=> (String(s||'').match(/[🟢🔴]/g)||[]).join('');
-              const vizFavDots = (function(){ const el=root.querySelector('.cmp-row.viz .fav.viz'); return onlyDots(el? (el.innerText||el.textContent||'') : ''); })();
-              const vizOppDots = (function(){ const el=root.querySelector('.cmp-row.viz .opp.viz'); return onlyDots(el? (el.innerText||el.textContent||'') : ''); })();
+              // Visualization row (.viz): read by inspecting .dot-win/.dot-loss spans
+              const vizFavDots = (function(){
+                const el = root.querySelector('.cmp-row.viz .fav.viz');
+                const r = readDots(el);
+                return r.dots || '';
+              })();
+              const vizOppDots = (function(){
+                const el = root.querySelector('.cmp-row.viz .opp.viz');
+                const r = readDots(el);
+                return r.dots || '';
+              })();
               // Per user request: use last10 row as H2H series relative to favorite
               let h2hFav = rFav;
               let h2hOpp = rOpp && rOpp.dots ? rOpp : (function(){
@@ -1454,11 +1531,64 @@ def _extract_compare_block(page) -> Optional[dict]:
 
 def _extract_league_name(page) -> Optional[str]:
     """Пытается извлечь полное название лиги/турнира со страницы статистики.
-    Возвращает строку или None, если распознать не удалось.
-    Эвристики:
-      - ищем подписи вида "Турнир: ..." или "Лига: ..." в тексте страницы
-      - ищем фразы, начинающиеся с известных префиксов ("Лига Про", "Кубок ТТ", "Сетка Кап")
+    Приоритет: явные DOM‑элементы → эвристики по тексту. Возвращает строку или None.
     """
+    # 0) Попробуем прочитать из заметных DOM‑узлов (заголовки/подзаголовки)
+    try:
+        league_dom = page.evaluate(
+            """
+            () => {
+              const pick = (el) => (el ? (el.innerText||el.textContent||'').replace(/\s+/g,' ').trim() : '');
+              const roots = [
+                document.querySelector('h1'),
+                document.querySelector('header h1'),
+                document.querySelector('.table-top'),
+                document.querySelector('.container-xl.mb-5 h1'),
+                document.querySelector('.breadcrumbs'),
+              ].filter(Boolean);
+              const texts = [];
+              for (const r of roots) {
+                const t = pick(r); if (t) texts.push(t);
+              }
+              // Также попробуем title страницы
+              const title = (document.title||'').trim();
+              if (title) texts.push(title);
+              // Ищем самое правдоподобное по ключевым словам
+              const key = /(лига|турнир|cup|liga|league|pro|tt)/i;
+              const candidates = texts
+                .map(s => s.replace(/\s+/g,' ').trim())
+                .filter(s => key.test(s) && s.length >= 3);
+              // Вернём самую длинную осмысленную строку
+              if (candidates.length) {
+                candidates.sort((a,b)=>b.length - a.length);
+                let top = candidates[0];
+                // Срежем хвосты интерфейса (например, «Статистика», «Игроки»)
+                top = top.replace(/\s*(Статистика|Игроки)\b.*$/i,'').trim();
+                return top || candidates[0];
+              }
+              return null;
+            }
+            """,
+        )
+        if isinstance(league_dom, str) and 2 <= len(league_dom) <= 120:
+            return league_dom
+    except Exception:
+        pass
+
+    # 1) Если ранее собрали список лиг, попробуем найти любое из названий прямо в DOM/тексте
+    try:
+        if _KNOWN_LEAGUES:
+            txt_dom = page.evaluate("() => (document.body ? (document.body.innerText||document.body.textContent||'') : '')") or ''
+            hay = re.sub(r"\s+", " ", txt_dom).strip()
+            if hay:
+                # Ищем точные вхождения, длинные названия — приоритетнее
+                for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
+                    if name and name in hay:
+                        return name
+    except Exception:
+        pass
+
+    # 2) Текст страницы (fallback)
     try:
         body = page.locator('body').inner_text(timeout=1500)
     except Exception:
@@ -1467,7 +1597,6 @@ def _extract_league_name(page) -> Optional[str]:
     if not text:
         return None
 
-    # 1) Явные подписи
     for pat in (
         r"(?:Турнир|Лига)\s*[:\-–—]\s*([^\n\r]+)",
         r"Турнир\s*\.?\s*([^\n\r]+)",
@@ -1475,20 +1604,24 @@ def _extract_league_name(page) -> Optional[str]:
         m = re.search(pat, text, flags=re.IGNORECASE)
         if m:
             val = (m.group(1) or '').strip()
-            # Ограничим разумную длину и уберём хвост после 'Статистика' и т.п.
             val = re.split(r"\s{2,}|\sСтатистика\b|\sИгроки\b", val)[0].strip()
-            if 2 <= len(val) <= 80:
+            if 2 <= len(val) <= 120:
                 return val
 
-    # 2) По известным префиксам: забираем всю фразу до конца предложения/строки
-    prefixes = ["Лига Про", "Кубок ТТ", "Сетка Кап"]
+    prefixes = ["Лига Про", "Кубок ТТ", "Сетка Кап", "TT Cup", "Win Cup", "Liga Pro"]
+    # расширим известными полными названиями, если есть
+    try:
+        for x in _KNOWN_LEAGUES:
+            if isinstance(x, str) and x:
+                prefixes.append(x)
+    except Exception:
+        pass
     best = None
     best_len = 0
     for pfx in prefixes:
         m = re.search(rf"\b{re.escape(pfx)}[^\n\r]*", text, flags=re.IGNORECASE)
         if m:
             cand = m.group(0).strip()
-            # Обрезаем по жёстким разделителям, если встретятся
             cand = re.split(r"\sСтатистика\b|\sИгроки\b|https?://", cand)[0].strip()
             if best is None or len(cand) > best_len:
                 best, best_len = cand, len(cand)
@@ -1507,83 +1640,141 @@ def _format_tg_message_new(
     h2h_score: Optional[str] = None,
     league: Optional[str] = None,
 ) -> str:
-    """Compose a Telegram message using the new compare block when available.
-    Falls back to the old 4-line format based on fallback_metrics.
-    """
+    """Build a compact Telegram message. Uses compare-block data when present,
+    otherwise falls back to a short 4-line summary."""
     ts = datetime.now().strftime('%H:%M')
     if isinstance(compare, dict):
-        # New requested layout focused on last-10 dots and MBT/FCI lines
+        # New layout: mirror key rows from .min2-compare for Telegram
         try:
             def esc(s: str) -> str:
                 return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
+            def fmt0(v):
+                try:
+                    return f"{float(v):.0f}%"
+                except Exception:
+                    return '—'
+            def nb_line(no, h2h):
+                left = f"без H2H {fmt0(no)}" if isinstance(no, (int, float)) else None
+                right = f"с H2H {fmt0(h2h)}" if isinstance(h2h, (int, float)) else None
+                return ' • '.join([p for p in (left, right) if p]) or '—'
+            def norm_delta(text_s: str) -> str:
+                t = (text_s or '').replace('\xa0', ' ').replace('&nbsp;', ' ')
+                pos = ('+' in t) or ('↑' in t)
+                neg = ('−' in t or '-' in t) or ('↓' in t)
+                m = re.search(r"([+−\-]?\s*\d+[\.,]?\d*)\s*%", t)
+                num = m.group(1).replace(' ', '') if m else None
+                if pos and not neg:
+                    return f"{num}% ↑" if num else "↑"
+                if neg and not pos:
+                    if num and not num.startswith('−') and num.startswith('-'):
+                        num = '−' + num[1:]
+                    return f"{num}% ↓" if num else "↓"
+                return (num + '% ↔') if num else '↔'
+
             ts_line = f"⏱ {datetime.now().strftime('%H:%M')}" + (f" {esc(league)}" if league else "")
             header2 = f"🏆 {esc(fav)} VS  🚩{esc(opp)}"
-            # last-10 dots: prefer per-player visualization/last10; fallback to vizDots; do NOT use H2H here
-            last10 = compare.get('last10') or {}
-            fav_dots = (last10.get('favDots') or '').strip()
-            opp_dots = (last10.get('oppDots') or '').strip()
-            if not fav_dots or not opp_dots:
-                vd = compare.get('vizDots') or {}
-                if not fav_dots:
-                    fav_dots = (vd.get('fav') or '').strip()
-                if not opp_dots:
-                    opp_dots = (vd.get('opp') or '').strip()
-            sep = '─' * 14
-            # "статистика" marker line
-            stat_title = 'статистика'
-            # H2H dots (oriented for favorite) — from dedicated last10/h2h row if present
+
+            # NB (без BT), ML(3), IDX(3), Δ(3−5)
+            nb = compare.get('nb3') or {}
+            nb_f = nb_line((nb.get('fav') or {}).get('noH2H'), (nb.get('fav') or {}).get('h2h'))
+            nb_o = nb_line((nb.get('opp') or {}).get('noH2H'), (nb.get('opp') or {}).get('h2h'))
+            ml = compare.get('ml3') or {}
+            idx = compare.get('idx3') or {}
+            d35 = compare.get('d35') or {}
+            ml_f, ml_o = ml.get('fav'), ml.get('opp')
+            idx_f, idx_o = idx.get('fav'), idx.get('opp')
+            d_f, d_o = d35.get('fav') or '', d35.get('opp') or ''
+
+            # Visualization dots (explicitly use .viz rows per request)
+            vd = compare.get('vizDots') or {}
+            fav_dots = (vd.get('fav') or '').strip()
+            opp_dots = (vd.get('opp') or '').strip()
+            # Fallback to last10 only if viz is missing
+            if (not fav_dots) or (not opp_dots):
+                last10 = compare.get('last10') or {}
+                fav_dots = fav_dots or (last10.get('favDots') or '').strip()
+                opp_dots = opp_dots or (last10.get('oppDots') or '').strip()
             h2h = (compare.get('h2hDots') or {})
             h2h_line = (h2h.get('fav') or '').strip()
-            # Markov–BT summary
+            # Fallback: if H2H not extracted, reuse fav viz series
+            if not h2h_line:
+                h2h_line = fav_dots
+
+            # MBT + FCI + Committee
             mbt = compare.get('mbt') or {}
-            mbt_pct = None
-            if isinstance(mbt, dict):
-                try:
-                    mbt_pct = float(mbt.get('pct')) if mbt.get('pct') is not None else None
-                except Exception:
-                    mbt_pct = None
-                top_score = mbt.get('bestScore') or '—'
+            top_score = mbt.get('bestScore') or '—'
+            mbt_pct = mbt.get('pct')
+            if isinstance(mbt_pct, (int, float)):
+                mbt_line = f"Марков–BT {int(round(float(mbt_pct)))}% топ-счёт: {esc(top_score)}"
             else:
-                top_score = '—'
-            if mbt_pct is not None:
-                mbt_line = f"Марков–BT {int(round(mbt_pct))}% & топ-счёт: {esc(top_score)}"
+                mbt_line = "Марков–BT — топ-счёт: —"
+            fci = compare.get('fciPct')
+            if isinstance(fci, (int, float)):
+                fci_line = f"FCI: {float(fci):.1f}%"
             else:
-                mbt_line = None
-            # FCI percent if available
-            fci_pct = None
-            try:
-                fci_pct = float(compare.get('fciPct')) if compare.get('fciPct') is not None else None
-            except Exception:
-                fci_pct = None
-            fci_line = None
-            if fci_pct is not None:
-                fci_line = f"{esc(fav)} — FCI: {fci_pct:.1f}%"
+                fci_line = "FCI: —"
+            comm = compare.get('committeePct')
+            if isinstance(comm, (int, float)):
+                sum_line = f"SUM: {int(round(float(comm)))}%"
+            else:
+                sum_line = "SUM: —"
 
             link = esc(_canonical_stats_url(url))
+
+            # Top visual lines with dots per your style
+            top_visual = []
+            if fav_dots:
+                top_visual.append('🏆 ' + fav_dots)
+                top_visual.append('──────────────')
+            if opp_dots:
+                top_visual.append('🚩 ' + opp_dots)
+
+            # Build compact box with two columns (fav | opp) using monospace
+            def fmt_pct(v):
+                try:
+                    return f"{float(v):.0f}%"
+                except Exception:
+                    return '—'
+            def pad_left(s: str, w: int = 10) -> str:
+                s = s or ''
+                return s.rjust(w)
+            def pad_right(s: str, w: int = 10) -> str:
+                s = s or ''
+                return s.ljust(w)
+            # Prepare values for rows
+            delta_l = norm_delta(d_f)
+            delta_r = norm_delta(d_o)
+            nb_no_l = fmt_pct((nb.get('fav') or {}).get('noH2H'))
+            nb_no_r = fmt_pct((nb.get('opp') or {}).get('noH2H'))
+            nb_h2h_l = fmt_pct((nb.get('fav') or {}).get('h2h'))
+            nb_h2h_r = fmt_pct((nb.get('opp') or {}).get('h2h'))
+            ml_l = fmt_pct(ml_f)
+            ml_r = fmt_pct(ml_o)
+            idx_l = fmt_pct(idx_f)
+            idx_r = fmt_pct(idx_o)
+            box_lines = [
+                f"📈 {pad_left(delta_l)} | {pad_right(delta_r)}",
+                f"👤 {pad_left(nb_no_l)} | {pad_right(nb_no_r)}",
+                f"👥 {pad_left(nb_h2h_l)} | {pad_right(nb_h2h_r)}",
+                f"📊 {pad_left(ml_l)} | {pad_right(ml_r)}",
+                f"💪 {pad_left(idx_l)} | {pad_right(idx_r)}",
+            ]
+
             parts = [
                 esc(ts_line),
                 esc(header2),
                 '',
-                esc('🏆 ' + fav_dots) if fav_dots else '',
-                esc(sep),
-                esc('🚩 ' + opp_dots) if opp_dots else '',
+                *[esc(x) for x in top_visual],
                 '',
-                esc(stat_title),
-                '',
+                "<pre>" + esc("\n".join(box_lines)) + "</pre>",
                 ('⚔️ ' + esc(h2h_line)) if h2h_line else '',
                 esc(mbt_line) if mbt_line else '',
+                esc(sum_line) if sum_line else '',
                 esc(fci_line) if fci_line else '',
                 f"<a href=\"{link}\">Статистика</a>",
             ]
-            # filter empty lines but keep intended blank lines by preserving '' entries we added
-            out = []
-            for s in parts:
-                if s is None:
-                    continue
-                out.append(s)
-            return "\n".join(out)
+            return "\n".join([s for s in parts if s])
         except Exception:
-            # fall back to old formatted table below if anything goes wrong
             pass
 
         # Old table formatting kept as fallback if above failed
@@ -1764,6 +1955,8 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         # 1) LIVE: текущая страница
         page.wait_for_timeout(800)
         try:
+            # Обновим список лиг с live_v2 прежде чем собирать ссылки
+            _update_known_leagues_from_page(page)
             expand_live_list(page)
         except Exception:
             pass

@@ -284,9 +284,10 @@ function renderFavOppCompare(payload) {
       <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;">
         <div style="padding:8px 10px;font-weight:700;">${payload?.favName || 'Фаворит'} — FCI: ${Math.round(payload.fciFavPct)}%</div>
       </div>` : '';
-  const committeeRow = (typeof payload?.committeePct === 'number') ? `
+  // Committee info line: "Fav: <name> • Комитет (калибр.): <pct>%"
+  const committeeInfo = (typeof payload?.committeePct === 'number') ? `
       <div class="cmp-row committee" style="display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;">
-        <div style="padding:8px 10px;font-weight:700;">${payload?.favName || 'Фаворит'} — Комитет (калибр.): ${Math.round(payload.committeePct)}%</div>
+        <div style="padding:8px 10px;">Fav: ${payload?.favName || 'Фаворит'} • Комитет (калибр.): ${Math.round(payload.committeePct)}%</div>
       </div>` : '';
 
   return `
@@ -295,8 +296,6 @@ function renderFavOppCompare(payload) {
         <div style="padding:8px 10px;font-weight:600;">${favHdr}</div>
         <div style="padding:8px 10px;font-weight:600;border-left:1px solid #eee;">${oppHdr}</div>
       </div>
-      ${fciRow}
-      ${committeeRow}
       <div class="cmp-row nb3" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #f1f1f1;">
         <div class="fav nb3" style="padding:8px 10px;">${favNb}</div>
         <div class="opp nb3" style="padding:8px 10px;border-left:1px solid #f1f1f1;">${oppNb}</div>
@@ -322,14 +321,16 @@ function renderFavOppCompare(payload) {
       <div class="cmp-row last10" style="display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid #f1f1f1;">
         <div class="fav last10" style="padding:8px 10px; grid-column: 1 / span 2;">${last10Html}</div>
       </div>`}
-      ${ (typeof payload?.hmProb === 'number') ? `
-      <div class="cmp-row hm" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
-        <div style="padding:8px 10px;">Марков (очки): ${Math.round(payload.hmProb)}% • Топ-счёт: ${payload?.hmTop || '—'} • ≥2 сетов: ${Math.round(payload?.hmP2sets||0)}%</div>
-      </div>` : ''}
+      
       ${mbt ? `
       <div class="cmp-row mbt" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
         <div style="padding:8px 10px;font-weight:600;color:#111827;">Марков–BT ${Math.round(mbt.pFav*100)}% и Топ-счёт: ${mbt.bestScore}</div>
       </div>` : ''}
+      ${ (typeof payload?.fciFavPct === 'number') ? `
+      <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
+        <div style="padding:8px 10px;">FCI: ${Math.round(payload.fciFavPct)}%</div>
+      </div>
+      ${committeeInfo}` : committeeInfo}
     </div>
   `;
 }
@@ -1039,7 +1040,7 @@ function renderFavOppCompare(payload) {
       visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
       visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
     };
-    const htmlCmp_ins = renderFavOppCompare(cmpPayload_ins);
+    // htmlCmp_ins будет создан ниже, после расчёта FCI и committee
     // Build compare block (fav vs outsider) right under the decision block
     const a3h_dec = Number(data?.playerA?.nonBTProbability3_h2h);
     const b3h_dec = Number(data?.playerB?.nonBTProbability3_h2h);
@@ -1109,14 +1110,29 @@ function renderFavOppCompare(payload) {
       } catch(_) {}
     }
 
+    // Read FCI from minimalForecastBlock if present (UI-rendered value)
+    let fciFromUI = null;
+    try {
+      const mf = document.getElementById('mfTitle');
+      const txt = mf ? (mf.innerText || mf.textContent || '') : '';
+      const mm = String(txt).match(/FCI\s*:\s*(\d{1,3})%/i);
+      if (mm) { const vv = Number(mm[1]); if (isFinite(vv)) fciFromUI = vv; }
+    } catch(_) {}
+
     const cmpPayload_dec2 = {
       ...cmpPayload_dec,
-      fciFavPct: Math.round((FCI_ins.FCI||0)*100),
+      fciFavPct: (fciFromUI!=null ? fciFromUI : Math.round((FCI_ins.FCI||0)*100)),
       committeePct: (committeeFav!=null ? Math.round(committeeFav*100) : undefined),
       hmProb: hmRes ? Math.round((hmRes.p_match||0)*100) : undefined,
       hmTop: hmRes ? (hmRes.topScore||undefined) : undefined,
       hmP2sets: hmRes ? Math.round((hmRes.p_2sets||0)*100) : undefined
     };
+    // Добавим FCI/committee и в первый compare-блок (ins)
+    try {
+      if (FCI_ins && typeof FCI_ins.FCI==='number') cmpPayload_ins.fciFavPct = Math.round(FCI_ins.FCI*100);
+      if (committeeFav!=null && isFinite(committeeFav)) cmpPayload_ins.committeePct = Math.round(committeeFav*100);
+    } catch(_) {}
+    const htmlCmp_ins = renderFavOppCompare(cmpPayload_ins);
     const htmlCmp = renderFavOppCompare(cmpPayload_dec2);
 
     const containerId = 'tsx-auto-summaries';
@@ -1394,6 +1410,54 @@ function renderFavOppCompare(payload) {
     // Add Fav vs Opp compare right under the decision block
     const a3h_dec2 = Number(data?.playerA?.nonBTProbability3_h2h);
     const b3h_dec2 = Number(data?.playerB?.nonBTProbability3_h2h);
+    // Compute FCI for decision-attached compare block
+    let fciVal_dec = null;
+    let committeeVal_dec = null;
+    try {
+      const fciCtx_dec = {
+        favIsA,
+        base3: favIsA ? a3 : b3,
+        idxFav3: fav10.p3,
+        mlFav3: (function(){ const v = favIsA ? pA3 : pB3; return Number.isFinite(v)? v : undefined; })(),
+        d5_10: fav10.d5_10,
+        d3_5: fav10.d3_5,
+        visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+        visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      };
+      let FCI_dec = null;
+      try { FCI_dec = computeFCI_improved(data, fciCtx_dec); } catch(_) { FCI_dec = null; }
+      if (!FCI_dec) {
+        const pctTo01 = (x)=> (typeof x==='number'? Math.max(0,Math.min(1,x/100)) : null);
+        const base3p = pctTo01(favIsA ? a3 : b3);
+        const logit3p = pctTo01(favIsA ? pA3 : pB3);
+        const proxy = (base3p!=null? base3p : (logit3p!=null? logit3p : 0.5));
+        FCI_dec = { FCI: proxy, verdict: '', color: '#111827' };
+      }
+      // Prefer UI value if present (from minimal forecast title)
+      let fciUI = null;
+      try {
+        const mf = document.getElementById('mfTitle');
+        const txt = mf ? (mf.innerText || mf.textContent || '') : '';
+        const mm = String(txt).match(/FCI\s*:\s*(\d{1,3})%/i);
+        if (mm) { const vv = Number(mm[1]); if (isFinite(vv)) fciUI = vv; }
+      } catch(_) {}
+      fciVal_dec = (fciUI!=null) ? fciUI : Math.round((FCI_dec.FCI||0)*100);
+    } catch(_) {}
+    // Compute Committee% oriented to favorite for this block
+    try {
+      const pA_fore01 = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+      const pB_fore01 = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+      const v = favIsA ? pA_fore01 : (pB_fore01!=null? (1-pB_fore01) : null);
+      if (typeof v === 'number' && isFinite(v)) committeeVal_dec = Math.round(v*100);
+    } catch(_) {}
+    if (committeeVal_dec == null) {
+      try {
+        const sv = document.getElementById('summaryFav');
+        const st = sv ? (sv.innerText || sv.textContent || '') : '';
+        const ms = String(st).match(/Комитет\s*\(калибр\.\)\s*:\s*(\d{1,3})%/i);
+        if (ms) { const vv = Number(ms[1]); if (isFinite(vv)) committeeVal_dec = vv; }
+      } catch(_) {}
+    }
     const cmpPayload_dec2 = {
       favName: fav10.name,
       oppName: opp10.name,
@@ -1408,7 +1472,9 @@ function renderFavOppCompare(payload) {
       d3_5Fav: (typeof fav10?.d3_5 === 'number') ? fav10.d3_5 : null,
       d3_5Opp: (typeof opp10?.d3_5 === 'number') ? opp10.d3_5 : null,
       visFavTokens: String(data?.playerA?.visualization||'').split(/\s+/).slice(0,10).join(' '),
-      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' ')
+      visOppTokens: String(data?.playerB?.visualization||'').split(/\s+/).slice(0,10).join(' '),
+      fciFavPct: (typeof fciVal_dec === 'number') ? fciVal_dec : undefined,
+      committeePct: (typeof committeeVal_dec === 'number') ? committeeVal_dec : undefined
     };
     const htmlCmp2 = renderFavOppCompare(cmpPayload_dec2);
 
@@ -1540,7 +1606,7 @@ function renderFavOppCompare(payload) {
       last10Avail: favH2H10_t.length > 0,
       last10Tokens: favH2H10_t.length > 0 ? tokens_t.join(' ') : null
     };
-    const htmlCmp_ins2 = renderFavOppCompare(cmpPayload_ins2);
+    // htmlCmp_ins2 будет создан ниже после добавления FCI/committee в payload
 
     // FCI v2.0 block for this insertion path
     const computeFCI_local = (data, ctx) => { try { return computeFCI_improved(data, ctx); } catch(_) { return null; } };
@@ -1570,13 +1636,40 @@ function renderFavOppCompare(payload) {
       else { verdict='Слабый игрок'; color='#ef4444'; }
       FCI2 = { FCI: p, verdict, color };
     }
+    // Pass inside compare-block as row
+    // Prefer UI-rendered FCI if present, else computed
+    try {
+      let fciUI = null;
+      const mf = document.getElementById('mfTitle');
+      const txt = mf ? (mf.innerText || mf.textContent || '') : '';
+      const mm = String(txt).match(/FCI\s*:\s*(\d{1,3})%/i);
+      if (mm) { const vv = Number(mm[1]); if (isFinite(vv)) fciUI = vv; }
+      if (fciUI!=null) cmpPayload_ins2.fciFavPct = fciUI;
+      else if (FCI2 && typeof FCI2.FCI==='number') cmpPayload_ins2.fciFavPct = Math.round(FCI2.FCI*100);
+    } catch(_) {}
+    // Committee % for this path
+    try {
+      const pA_fore01 = (typeof data?.forecast?.pA === 'number') ? data.forecast.pA : (typeof data?.predWinProbA==='number'? data.predWinProbA/100 : null);
+      const pB_fore01 = (typeof data?.forecast?.pB === 'number') ? data.forecast.pB : (typeof data?.predWinProbB==='number'? data.predWinProbB/100 : null);
+      const v = favIsA ? pA_fore01 : (pB_fore01!=null? (1-pB_fore01) : null);
+      if (typeof v==='number' && isFinite(v)) cmpPayload_ins2.committeePct = Math.round(v*100);
+    } catch(_) {}
+    // Fallback: read from globalSummary UI block
+    try {
+      if (typeof cmpPayload_ins2.committeePct !== 'number'){
+        const sv = document.getElementById('summaryFav');
+        const st = sv ? (sv.innerText || sv.textContent || '') : '';
+        const ms = String(st).match(/Комитет\s*\(калибр\.\)\s*:\s*(\d{1,3})%/i);
+        if (ms) { const vv = Number(ms[1]); if (isFinite(vv)) cmpPayload_ins2.committeePct = vv; }
+      }
+    } catch(_) {}
     try { console.info('[AUTO] FCI(insert):', FCI2); } catch(_) {}
     const htmlFCI2 = (FCI2 ? `
       <div class="cmp-row fci" style="display:grid;grid-template-columns:1fr;gap:0;border-top:1px solid #f1f1f1;background:#fcfcfc;">
         <div style="padding:8px 10px;font-weight:700;color:${FCI2.color};">FCI: ${(FCI2.FCI*100).toFixed(1)}%</div>
       </div>
     ` : '');
-
+    const htmlCmp_ins2 = renderFavOppCompare(cmpPayload_ins2);
     holder.innerHTML = htmlTop + htmlCmp_ins2 + htmlFCI2;
 
     // Prefer to place above the overall score/header block if present
@@ -3157,4 +3250,46 @@ function computeStabilityFromPatterns(p) {
   return score;
 }
 
+})();
+
+// Force-inject FCI and Committee rows into any .min2-compare if missing.
+(function(){
+  function readFciFromUI(){
+    try{ const el=document.getElementById('mfTitle'); const t=el?(el.innerText||el.textContent||''):''; const m=String(t).match(/FCI\s*:\s*(\d{1,3})%/i); if(m){ const v=+m[1]; if(isFinite(v)) return v; } }catch(_){ }
+    return null;
+  }
+  function readCommitteeFromUI(){
+    try{ const el=document.getElementById('summaryFav'); const t=el?(el.innerText||el.textContent||''):''; const m=String(t).match(/Комитет\s*\(калибр\.\)\s*:\s*(\d{1,3})%/i); if(m){ const v=+m[1]; if(isFinite(v)) return v; } }catch(_){ }
+    return null;
+  }
+  function injectOnce(root){
+    const fci = readFciFromUI();
+    const comm = readCommitteeFromUI();
+    if (fci==null && comm==null) return;
+    const blocks = root.querySelectorAll('.min2-compare');
+    blocks.forEach(bl=>{
+      const head = bl.querySelector('.cmp-head'); if(!head) return;
+      const favName = ((head.querySelector('div:first-child')||{}).textContent||'').trim() || 'Фаворит';
+      const firstRow = bl.querySelector('.cmp-row.nb3') || bl.children[1];
+      if (fci!=null && !bl.querySelector('.cmp-row.fci')){
+        const row=document.createElement('div'); row.className='cmp-row fci';
+        row.setAttribute('style','display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;');
+        row.innerHTML = `<div style="padding:8px 10px;font-weight:700;">${favName} — FCI: ${fci}%</div>`;
+        if(firstRow && firstRow.parentNode) firstRow.parentNode.insertBefore(row, firstRow); else bl.appendChild(row);
+      }
+      if (comm!=null && !bl.querySelector('.cmp-row.committee')){
+        const row=document.createElement('div'); row.className='cmp-row committee';
+        row.setAttribute('style','display:grid;grid-template-columns:1fr;gap:0;border-bottom:1px solid #f1f1f1;background:#fcfcfc;');
+        row.innerHTML = `<div style="padding:8px 10px;font-weight:700;">${favName} — Комитет (калибр.): ${comm}%</div>`;
+        const after = bl.querySelector('.cmp-row.fci') || firstRow;
+        if (after && after.nextSibling) bl.insertBefore(row, after.nextSibling); else bl.appendChild(row);
+      }
+    });
+  }
+  try { injectOnce(document); } catch(_){ }
+  try {
+    const mo = new MutationObserver(()=>{ try{ injectOnce(document); }catch(_){ } });
+    mo.observe(document.documentElement, { subtree:true, childList:true });
+    setInterval(()=>{ try{ injectOnce(document); }catch(_){ } }, 1200);
+  } catch(_){ }
 })();
