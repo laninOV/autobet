@@ -1822,6 +1822,138 @@ def _format_tg_message_new(
 
             link = esc(_canonical_stats_url(url))
 
+            # ===== Indicator: "Фаворит возьмёт ≥ 2 сета" =====
+            def _to_num(x):
+                try:
+                    v = float(x)
+                    if v != v:  # NaN
+                        return None
+                    return v
+                except Exception:
+                    return None
+
+            def _parse_delta_num(s: str):
+                try:
+                    if not s:
+                        return None
+                    m = re.search(r"([+−\-]?\s*\d+(?:[\.,]\d+)?)\s*%", str(s))
+                    if not m:
+                        return None
+                    num = m.group(1).replace(' ', '').replace(',', '.')
+                    # normalize unicode minus
+                    num = num.replace('−', '-')
+                    return float(num)
+                except Exception:
+                    return None
+
+            def build_min2_indicator(cmp: dict) -> list[str]:
+                try:
+                    # Inputs
+                    p_noH2H_3 = _to_num(((cmp.get('nb3') or {}).get('fav') or {}).get('noH2H'))
+                    p_withH2H_3 = _to_num(((cmp.get('nb3') or {}).get('fav') or {}).get('h2h'))
+                    logistic_3 = _to_num((cmp.get('ml3') or {}).get('fav'))
+                    strength_10 = _to_num((cmp.get('idx3') or {}).get('fav'))
+                    delta_3_5 = _parse_delta_num((cmp.get('d35') or {}).get('fav'))
+                    # We don't extract 5–10 from the page yet — use 3–5 as proxy if missing
+                    delta_5_10 = delta_3_5
+                    fci = _to_num(cmp.get('fciPct'))
+                    sum_pct = _to_num(cmp.get('committeePct'))
+                    h2h_last10 = (cmp.get('last10') or {}).get('favDots') or ''
+                    markov_top = ((cmp.get('mbt') or {}).get('bestScore')) or None
+
+                    # Normalization
+                    def clip01(x: float) -> float:
+                        return max(0.0, min(1.0, x))
+
+                    # Trend normalization per spec
+                    ds = []
+                    if isinstance(delta_5_10, (int, float)):
+                        ds.append(delta_5_10)
+                    if isinstance(delta_3_5, (int, float)):
+                        ds.append(delta_3_5)
+                    delta_min = min(ds) if ds else 0.0
+                    delta_min = max(-25.0, min(25.0, delta_min))
+                    delta_norm = (delta_min + 25.0) / 50.0
+
+                    # Short signals
+                    pNo = (p_noH2H_3 or 0.0) / 100.0
+                    pH2 = (p_withH2H_3 or 0.0) / 100.0
+                    pLog = (logistic_3 or 0.0) / 100.0
+                    pStr = (strength_10 or 0.0) / 100.0
+                    fciNorm = (fci or 0.0) / 100.0
+                    sumNorm = (sum_pct or 0.0) / 100.0
+
+                    # Sub-scores
+                    trendScore = delta_norm
+                    shortScore = 0.6 * pNo + 0.4 * pLog
+                    h2hShortBoost = 0.5 * pH2 + 0.5 * pNo if isinstance(p_withH2H_3, (int, float)) else shortScore
+                    shortWithH2H = 0.8 * shortScore + 0.2 * h2hShortBoost
+                    contextScore = pStr
+                    agreementScore = 0.7 * fciNorm + 0.3 * sumNorm
+                    h2hWins = h2h_last10.count('🟢') if isinstance(h2h_last10, str) else 5
+                    h2hScore = (h2hWins / 10.0) if h2hWins is not None else 0.5
+
+                    # Markov adjustment
+                    markovAdj = 0.0
+                    if isinstance(markov_top, str):
+                        if markov_top in {'3:0', '3:1'}:
+                            markovAdj = 0.05
+                        elif markov_top == '3:2':
+                            markovAdj = 0.02
+                        elif markov_top == '2:3':
+                            markovAdj = -0.02
+                        elif markov_top in {'1:3', '0:3'}:
+                            markovAdj = -0.05
+
+                    baseScore = (
+                        0.30 * trendScore +
+                        0.30 * shortWithH2H +
+                        0.20 * agreementScore +
+                        0.10 * contextScore +
+                        0.10 * h2hScore
+                    )
+                    finalScore = clip01(baseScore + markovAdj)
+
+                    # Verdict with stop flags
+                    verdict = 'PASS'
+                    tag = 'PASS'
+                    # Stop flags
+                    stop = False
+                    if (fci is not None and fci < 55) or \
+                       ((p_noH2H_3 is not None and p_noH2H_3 < 50) and (logistic_3 is not None and logistic_3 < 50)) or \
+                       ((delta_3_5 is not None and delta_3_5 <= -10) and (delta_5_10 is not None and delta_5_10 <= -10)):
+                        stop = True
+
+                    if not stop:
+                        if finalScore >= 0.70 and pNo >= 0.55 and pLog >= 0.50 and fciNorm >= 0.65:
+                            verdict = '✅ GO — фаворит почти гарантированно возьмёт ≥ 2 сета'
+                            tag = 'GO'
+                        elif finalScore >= 0.60 and fciNorm >= 0.60:
+                            verdict = '🟡 RISK — вероятно ≥ 2 сета, возможны 3:2 / 2:2'
+                            tag = 'RISK'
+                        else:
+                            verdict = '🔴 PASS — риск ≤1 сета / 0:3 высокий'
+                            tag = 'PASS'
+                    else:
+                        verdict = '🔴 PASS — стоп‑факторы'
+                        tag = 'PASS'
+
+                    # Build output lines
+                    def pct0(x):
+                        return '--' if x is None else f"{float(x):.0f}%"
+                    def fmt_sign(x):
+                        if x is None:
+                            return '±0%'
+                        return ('+' if x > 0 else ('−' if x < 0 else '±')) + f"{abs(float(x)):.0f}%"
+
+                    line1 = f"🔎 Вердикт: {verdict.split(' — ')[0]} | Score {finalScore:.2f}"
+                    # Per user request, output only the headline verdict line.
+                    return [line1]
+                except Exception:
+                    return []
+
+            min2_lines = build_min2_indicator(compare)
+
             # Top visual lines with dots per your style
             top_visual = []
             if fav_dots:
@@ -1873,6 +2005,7 @@ def _format_tg_message_new(
                 esc(sum_line) if sum_line else '',
                 esc(fci_line) if fci_line else '',
                 f"<a href=\"{link}\">Статистика</a>",
+                *(min2_lines or []),
             ]
             return "\n".join([s for s in parts if s])
         except Exception:

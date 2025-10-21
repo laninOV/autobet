@@ -1,2 +1,3 @@
-2025/10/21-01:09:07.978 1951d9 Creating DB /Users/lanin/Development/autobet/.chromium-profile/Default/Service Worker/Database since it was missing.
-2025/10/21-01:09:07.983 1951d9 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Service Worker/Database/MANIFEST-000001
+2025/10/21-14:08:27.913 1b6dcd Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Service Worker/Database/MANIFEST-000001
+2025/10/21-14:08:27.914 1b6dcd Recovering log #3
+2025/10/21-14:08:27.914 1b6dcd Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Service Worker/Database/000003.log 

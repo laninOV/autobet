@@ -135,6 +135,52 @@
 
 // (Удалено) Decision Summary block — по просьбе пользователя
 
+// --- Core verdict function (≥2 sets) v4 ---
+function computeTwoSetsVerdict_v4(data){
+  const clamp01 = (x)=> Math.max(0, Math.min(1, x));
+  const norm = (v)=> (typeof v === 'number' && isFinite(v)) ? clamp01(v/100) : 0;
+  const trend = (typeof data?.trend_delta === 'number' && isFinite(data.trend_delta)) ? (data.trend_delta/100) : 0;
+
+  const pNo = norm(data?.p_no_bt_3);
+  const pLog = norm(data?.p_logistic_3);
+  // If dedicated strength_3 is missing, use p_no_bt_3 as a proxy (short window strength)
+  const pStr = (typeof data?.p_strength_3 === 'number') ? norm(data.p_strength_3) : pNo;
+  const fci = norm(data?.fci);
+  const agree = norm(data?.sum_agree);
+  const markovScore = norm((typeof data?.markov_score === 'number') ? data.markov_score : 50);
+
+  // Base score per spec
+  let score01 = (
+    0.30 * pNo +
+    0.25 * pLog +
+    0.20 * fci +
+    0.10 * trend +
+    0.10 * pStr +
+    0.05 * markovScore
+  );
+
+  // Markov top-set adjustment
+  const top = String(data?.markov_topset||'');
+  if (['3:0','3:1','3:2'].includes(top)) score01 += 0.05;
+  if (['0:3','1:3','2:3'].includes(top)) score01 -= 0.05;
+
+  // Dissonance penalty
+  if ((pNo > 0.6 && pLog < 0.45) || (pNo < 0.45 && pLog > 0.6)) score01 -= 0.05;
+
+  // Agreement bonus
+  if (agree > 0.75) score01 += 0.02;
+
+  score01 = clamp01(score01);
+
+  let verdict, confidence;
+  if (score01 >= 0.70) { verdict = '✅ GO';  confidence = '≥2 сета ~90–95%'; }
+  else if (score01 >= 0.60) { verdict = '🟢 MID'; confidence = '≥2 сета ~75–85%'; }
+  else if (score01 >= 0.50) { verdict = '🟡 RISK'; confidence = '~50–65%'; }
+  else { verdict = '🔴 PASS'; confidence = '<50%'; }
+
+  return { score01, scorePct: +(score01*100).toFixed(1), verdict, confidence };
+}
+
 // --- "Возьмёт минимум 2 сета" Renderer ---
 function renderMinTwoSets(match) {
   const fav = match?.fav || {};
@@ -169,17 +215,34 @@ function renderMinTwoSets(match) {
 
   const matched = [passNoBt3, passForm3, passMl3].filter(Boolean).length;
 
-  let verdict = 'Осторожно';
-  let color = '#aa0';
-  // Обязательное условие для решения в пользу фаворита — Вероятность(3) ≥ 55%
-  const mustMlFav = ok(mlFav3) && mlFav3 >= 55;
-  if (!mustMlFav || shockOpp || matched <= 1) { verdict = 'PASS'; color = '#a00'; }
-  else if (matched >= 2 && mlRed) { verdict = 'Осторожно'; color = '#aa0'; }
-  else if (matched >= 2 && !mlRed) { verdict = 'GO'; color = '#0a0'; }
+  // Build v4 verdict inputs (tolerant to missing fields)
+  let fciFromUI = null;
+  try {
+    const mf = document.getElementById('mfTitle');
+    const txt = mf ? (mf.innerText || mf.textContent || '') : '';
+    const mm = String(txt).match(/FCI\s*:\s*(\d{1,3})%/i);
+    if (mm) { const vv = Number(mm[1]); if (isFinite(vv)) fciFromUI = vv; }
+  } catch(_) {}
+  const v4in = {
+    trend_delta: Number.isFinite(fav?.d3_5) ? fav.d3_5 : (Number.isFinite(fav?.d5_10) ? fav.d5_10 : 0),
+    p_no_bt_3: Number.isFinite(fav?.p3) ? fav.p3 : undefined,
+    p_logistic_3: Number.isFinite(mlFav3) ? mlFav3 : undefined,
+    p_strength_3: Number.isFinite(fav?.p3) ? fav.p3 : undefined,
+    fci: Number.isFinite(fciFromUI) ? fciFromUI : undefined,
+    sum_agree: undefined,
+    markov_score: undefined,
+    markov_topset: undefined
+  };
+  const v4 = computeTwoSetsVerdict_v4(v4in);
+  const verdictTag = v4.verdict;
+  let color = '#a00';
+  if (verdictTag.startsWith('✅')) color = '#0a0';
+  else if (verdictTag.startsWith('🟢')) color = '#16a34a';
+  else if (verdictTag.startsWith('🟡')) color = '#aa0';
+  else color = '#a00';
 
-  const mlBadge = mlRed ? ' (красная)' : '';
   const favName = match?.favName || 'Фаворит';
-  const header = `🔎 Решение: ${verdict} | Совпадений: ${matched}/3`;
+  const header = `🔎 Вердикт: ${verdictTag} | Score ${v4.score01.toFixed(2)}`;
 
   // Values for compact extract block
   const favMl3Int = ok(mlFav3) ? Math.round(mlFav3) : null;
