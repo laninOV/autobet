@@ -1822,7 +1822,7 @@ def _format_tg_message_new(
 
             link = esc(_canonical_stats_url(url))
 
-            # ===== Indicator: "Фаворит возьмёт ≥ 2 сета" =====
+            # ===== Final Verdict Line (unified score with flags) =====
             def _to_num(x):
                 try:
                     v = float(x)
@@ -1952,7 +1952,77 @@ def _format_tg_message_new(
                 except Exception:
                     return []
 
-            min2_lines = build_min2_indicator(compare)
+            def build_final_verdict_line(cmp: dict, fav_name: str, opp_name: str) -> str:
+                try:
+                    # Extract fields
+                    p_no = _to_num(((cmp.get('nb3') or {}).get('fav') or {}).get('noH2H'))
+                    p_log = _to_num((cmp.get('ml3') or {}).get('fav'))
+                    p_str = _to_num((cmp.get('idx3') or {}).get('fav'))
+                    fci_v = _to_num(cmp.get('fciPct'))
+                    sum_ag = _to_num(cmp.get('committeePct'))
+                    top = (cmp.get('mbt') or {}).get('bestScore')
+                    d35s = (cmp.get('d35') or {}).get('fav')
+                    dnum = _parse_delta_num(d35s)
+
+                    def clamp01(x: float) -> float:
+                        return max(0.0, min(1.0, x))
+                    def norm(x):
+                        return clamp01((x or 0.0)/100.0)
+
+                    pNo = norm(p_no)
+                    pLog = norm(p_log)
+                    pStr = norm(p_str)
+                    fciN = norm(fci_v)
+                    sumN = norm(sum_ag) if sum_ag is not None else None
+                    trendN = clamp01((dnum or 0.0)/100.0)
+
+                    # Base score per prompt
+                    score = 0.30*pNo + 0.25*pLog + 0.20*pStr + 0.15*fciN + 0.10*trendN
+
+                    # Corrections
+                    if sumN is not None and sumN < 0.50:
+                        score -= 0.05
+                    if dnum is not None and dnum < -10:
+                        score -= 0.05
+                    if (pNo > 0.60 and pLog < 0.45) or (pNo < 0.45 and pLog > 0.60):
+                        score -= 0.10
+                    if isinstance(top, str) and top in { '3:0','3:1','3:2' }:
+                        score += 0.04
+                    elif isinstance(top, str) and top in { '0:3','1:3','2:3' }:
+                        score -= 0.06
+
+                    score = clamp01(score)
+
+                    # Underdog proxy score (mirrored composite)
+                    und = clamp01(0.30*(1-pLog) + 0.25*(1-pNo) + 0.20*(1-pStr) + 0.15*(1-fciN) + 0.10*(1-trendN)
+                                   + (0.06 if (isinstance(top,str) and top in {'0:3','1:3','2:3'}) else (-0.04 if (isinstance(top,str) and top in {'3:0','3:1','3:2'}) else 0.0)))
+
+                    # Decide badge and stake per prompt
+                    badge = '🔴 PASS'
+                    flag = '—'
+                    stake = '—'
+                    out_score = score
+                    if score >= 0.85:
+                        badge = '✅ GO'; flag = '🏆'; stake = fav_name
+                    elif score >= 0.70:
+                        badge = '🟢 MID'; flag = '🏆'; stake = fav_name
+                    elif score >= 0.55:
+                        badge = '🟡 RISK'; flag = '🏆'; stake = fav_name
+                    elif score < 0.45 and und >= 0.60:
+                        badge = '🟢 GO'; flag = '🚩'; stake = opp_name; out_score = score
+                    else:
+                        badge = '🔴 PASS'; flag = '—'; stake = '—'
+
+                    # Build compact line without labels; keep label only for PASS stake
+                    if stake == '—':
+                        stake_part = 'Ставка: —'
+                    else:
+                        stake_part = f"{flag} {esc(stake)}"
+                    return f"🎯 {out_score:.2f} | {badge} | {stake_part}"
+                except Exception:
+                    return ''
+
+            final_line = build_final_verdict_line(compare, fav, opp)
 
             # Top visual lines with dots per your style
             top_visual = []
@@ -2005,7 +2075,7 @@ def _format_tg_message_new(
                 esc(sum_line) if sum_line else '',
                 esc(fci_line) if fci_line else '',
                 f"<a href=\"{link}\">Статистика</a>",
-                *(min2_lines or []),
+                final_line if final_line else '',
             ]
             return "\n".join([s for s in parts if s])
         except Exception:

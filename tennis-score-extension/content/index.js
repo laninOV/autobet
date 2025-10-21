@@ -136,6 +136,45 @@
 // (Удалено) Decision Summary block — по просьбе пользователя
 
 // --- Core verdict function (≥2 sets) v4 ---
+/*
+🧭 PROMPT: Расчёт прогноза на “фаворит возьмёт ≥ 2 сета”
+
+Вход: p_no_bt_3, p_logistic_3, fci, trend_delta, p_strength_3, sum_agree, markov_topset.
+
+Алгоритм:
+  score =
+    0.25 * p_no_bt_3 +
+    0.30 * p_logistic_3 +
+    0.20 * fci +
+    0.10 * (trend_delta/100) +
+    0.10 * p_strength_3 +
+    0.05 * markov;
+
+Коррекции:
+  - диссонанс: если (p_no_bt_3>0.60 && p_logistic_3<0.45) или (p_no_bt_3<0.45 && p_logистическая_3>0.60) → −0.10
+  - слабое согласие: если sum_agree < 0.50 → −0.05
+  - марков-топ: +0.04 для {3:0,3:1,3:2}, −0.06 для {0:3,1:3,2:3}
+
+Вердикт (Fav режим):
+  ≥0.72 → ✅ GO; 0.60–0.71 → 🟢 MID; 0.55–0.59 → 🟡 RISK; <0.55 → 🔴 PASS.
+
+Анти‑режим (Und +1.5):
+  Строим отдельный UndScore:
+    UndScore = 0.30*(1-p_log3) + 0.25*(1-p_no3) + 0.15*(1-fci) + 0.10*(-trend) + 0.10*(1-p_str3) + 0.10*markov_pen,
+    где markov_pen = +0.06 для {0:3,1:3,2:3}, −0.04 для {3:0,3:1,3:2}.
+  Пороги: ≥0.72 → ✅ GO(+1.5); 0.60–0.71 → 🟢 MID(+1.5); иначе — пропуск.
+
+Приоритет вывода:
+  - Если FavScore ≥0.60 и UndScore ≥0.60 → 🟡 NEUTRAL (пропуск)
+  - Иначе если FavScore ≥0.60 → Fav ≥2
+  - Иначе если FavScore < 0.55 и UndScore ≥0.60 → Und +1.5
+  - Иначе 🔴 PASS
+
+Quality‑гейты:
+  - Если p_log3<0.40 и p_no3<0.45 → запрет Fav ≥2
+  - Если sum_agree<0.40 → всё в PASS
+  - Если markov_topset==='0:3' и p_log3≤0.45 → анти‑приоритет
+*/
 function computeTwoSetsVerdict_v4(data){
   const clamp01 = (x)=> Math.max(0, Math.min(1, x));
   const norm = (v)=> (typeof v === 'number' && isFinite(v)) ? clamp01(v/100) : 0;
@@ -146,13 +185,13 @@ function computeTwoSetsVerdict_v4(data){
   // If dedicated strength_3 is missing, use p_no_bt_3 as a proxy (short window strength)
   const pStr = (typeof data?.p_strength_3 === 'number') ? norm(data.p_strength_3) : pNo;
   const fci = norm(data?.fci);
-  const agree = norm(data?.sum_agree);
+  const agree = (typeof data?.sum_agree === 'number' && isFinite(data.sum_agree)) ? clamp01(data.sum_agree/100) : null;
   const markovScore = norm((typeof data?.markov_score === 'number') ? data.markov_score : 50);
 
   // Base score per spec
-  let score01 = (
-    0.30 * pNo +
-    0.25 * pLog +
+  let favScore = (
+    0.25 * pNo +
+    0.30 * pLog +
     0.20 * fci +
     0.10 * trend +
     0.10 * pStr +
@@ -161,24 +200,66 @@ function computeTwoSetsVerdict_v4(data){
 
   // Markov top-set adjustment
   const top = String(data?.markov_topset||'');
-  if (['3:0','3:1','3:2'].includes(top)) score01 += 0.05;
-  if (['0:3','1:3','2:3'].includes(top)) score01 -= 0.05;
+  if (['3:0','3:1','3:2'].includes(top)) favScore += 0.04;
+  if (['0:3','1:3','2:3'].includes(top)) favScore -= 0.06;
 
   // Dissonance penalty
-  if ((pNo > 0.6 && pLog < 0.45) || (pNo < 0.45 && pLog > 0.6)) score01 -= 0.05;
+  const dissonance = ((pNo > 0.6 && pLog < 0.45) || (pNo < 0.45 && pLog > 0.6));
+  if (dissonance) favScore -= 0.10;
 
-  // Agreement bonus
-  if (agree > 0.75) score01 += 0.02;
+  // Weak agreement penalty
+  if (agree != null && agree < 0.50) favScore -= 0.05;
 
-  score01 = clamp01(score01);
+  // Quality gates
+  const forbidFav = ((pLog < 0.40) && (pNo < 0.45));
+  const chaosAllPass = (agree != null && agree < 0.40);
+  const antiPriority = (top === '0:3' && pLog <= 0.45);
+
+  favScore = clamp01(favScore);
+  if (forbidFav) favScore = Math.min(favScore, 0.54); // keep below Fav threshold
+  if (chaosAllPass) favScore = 0; // force PASS
+
+  // Underdog +1.5 score
+  const pNo_u = 1 - pNo;
+  const pLog_u = 1 - pLog;
+  const pStr_u = 1 - pStr;
+  const fci_u = 1 - fci;
+  let undScore = (
+    0.30 * pLog_u +
+    0.25 * pNo_u +
+    0.15 * fci_u +
+    0.10 * (-trend) +
+    0.10 * pStr_u +
+    0.10 * ( ['0:3','1:3','2:3'].includes(top) ? 0.06 : (['3:0','3:1','3:2'].includes(top) ? -0.04 : 0) )
+  );
+  if (dissonance) undScore += 0.05;
+  if (agree != null && agree < 0.45) undScore += 0.05;
+  if (chaosAllPass) undScore = 0; // force PASS in chaos
+  undScore = clamp01(undScore);
 
   let verdict, confidence;
-  if (score01 >= 0.70) { verdict = '✅ GO';  confidence = '≥2 сета ~90–95%'; }
-  else if (score01 >= 0.60) { verdict = '🟢 MID'; confidence = '≥2 сета ~75–85%'; }
-  else if (score01 >= 0.50) { verdict = '🟡 RISK'; confidence = '~50–65%'; }
-  else { verdict = '🔴 PASS'; confidence = '<50%'; }
+  let mode = 'Neutral/Pass';
+  let score01 = favScore;
+  // Conflict check
+  const favOK = (favScore >= 0.60);
+  const undOK = (undScore >= 0.60);
+  if (favOK && undOK) {
+    verdict = '🟡 NEUTRAL'; confidence = 'пропуск'; mode = 'Neutral/Pass'; score01 = Math.max(favScore, undScore);
+  } else if (favOK) {
+    if (favScore >= 0.72) { verdict = '✅ GO'; confidence = '≥2 сета ~90–95%'; }
+    else { verdict = '🟢 MID'; confidence = '≥2 сета ~75–85%'; }
+    mode = 'Fav ≥2'; score01 = favScore;
+  } else if ((favScore < 0.55 && undOK) || (antiPriority && undOK)) {
+    if (undScore >= 0.72) { verdict = '✅ GO(+1.5)'; confidence = '≈85–90%'; }
+    else { verdict = '🟢 MID(+1.5)'; confidence = '≈75–85%'; }
+    mode = 'Underdog +1.5'; score01 = undScore;
+  } else if (favScore >= 0.55 && favScore < 0.60) {
+    verdict = '🟡 RISK'; confidence = '55–65%'; mode = 'Neutral/Pass'; score01 = favScore;
+  } else {
+    verdict = '🔴 PASS'; confidence = '<50%'; mode = 'Neutral/Pass'; score01 = Math.max(favScore, undScore);
+  }
 
-  return { score01, scorePct: +(score01*100).toFixed(1), verdict, confidence };
+  return { score01, scorePct: +(score01*100).toFixed(1), verdict, confidence, favScore, undScore, mode };
 }
 
 // --- "Возьмёт минимум 2 сета" Renderer ---
@@ -234,15 +315,81 @@ function renderMinTwoSets(match) {
     markov_topset: undefined
   };
   const v4 = computeTwoSetsVerdict_v4(v4in);
-  const verdictTag = v4.verdict;
-  let color = '#a00';
-  if (verdictTag.startsWith('✅')) color = '#0a0';
-  else if (verdictTag.startsWith('🟢')) color = '#16a34a';
-  else if (verdictTag.startsWith('🟡')) color = '#aa0';
-  else color = '#a00';
+
+  // ===== Final verdict per latest PROMPT (flags + unified score) =====
+  // Try to enrich with SUM (committee) and Markov top-set from compare block if available
+  let sumAgree = null, markovTop = null;
+  try {
+    const cEl = document.querySelector('.cmp-row.committee');
+    if (cEl) {
+      const tt = (cEl.innerText || cEl.textContent || '').replace(/\s+/g,' ').trim();
+      const mc = tt.match(/комитет\s*\(калибр\.\)\s*:\s*(\d{1,3})%/i);
+      if (mc) { const vv = Number(mc[1]); if (isFinite(vv)) sumAgree = vv; }
+    }
+  } catch(_) {}
+  try {
+    const mEl = document.querySelector('.cmp-row.mbt');
+    if (mEl) {
+      const tt = (mEl.innerText || mEl.textContent || '').replace(/\s+/g,' ').trim();
+      const ms = tt.match(/Топ\s*[-–—]?\s*сч[её]т\s*:\s*([0-9:]+)/i);
+      if (ms) markovTop = ms[1];
+    }
+  } catch(_) {}
+
+  function computeFinalVerdict_v5(inp, names){
+    const clamp01 = (x)=> Math.max(0, Math.min(1, x));
+    const norm = (v)=> (typeof v === 'number' && isFinite(v)) ? clamp01(v/100) : 0;
+    const pNo = norm(inp.p_no_bt_3);
+    const pLog = norm(inp.p_logistic_3);
+    const pStr = norm(inp.p_strength_3);
+    const fci = norm(inp.fci);
+    const trend = (typeof inp.trend_delta === 'number' && isFinite(inp.trend_delta)) ? clamp01(inp.trend_delta/100) : 0;
+    const sum = norm(inp.sum_agree);
+    const top = String(inp.markov_topset||'');
+
+    let score = 0.30*pNo + 0.25*pLog + 0.20*pStr + 0.15*fci + 0.10*trend;
+    if (sum < 0.50 && sum > 0) score -= 0.05;
+    if (inp.trend_delta != null && inp.trend_delta < -10) score -= 0.05;
+    if ((pNo > 0.60 && pLog < 0.45) || (pNo < 0.45 && pLog > 0.60)) score -= 0.10;
+    if (['3:0','3:1','3:2'].includes(top)) score += 0.04;
+    else if (['0:3','1:3','2:3'].includes(top)) score -= 0.06;
+    score = clamp01(score);
+
+    // Underdog mirror score (use our earlier UndScore style as proxy)
+    const und = clamp01(
+      0.30*(1-pLog) + 0.25*(1-pNo) + 0.20*(1-pStr) + 0.15*(1-fci) + 0.10*(1-trend)
+      + (['0:3','1:3','2:3'].includes(top) ? 0.06 : (['3:0','3:1','3:2'].includes(top) ? -0.04 : 0))
+    );
+
+    const favName = names.favName||'Фаворит';
+    const undName = names.undName||'Аутсайдер';
+    let badge = '🔴 PASS', color = '#a00', outScore = score, stakeName = '—', flag='—';
+    if (score >= 0.85) { badge='✅ GO'; color='#059669'; stakeName=favName; flag='🏆'; }
+    else if (score >= 0.70) { badge='🟢 MID'; color='#16a34a'; stakeName=favName; flag='🏆'; }
+    else if (score >= 0.55) { badge='🟡 RISK'; color='#ca8a04'; stakeName=favName; flag='🏆'; }
+    else if (score < 0.45 && und >= 0.60) { badge='🟢 GO'; color='#16a34a'; outScore=score; stakeName=undName; flag='🚩'; }
+    else { badge='🔴 PASS'; color='#a00'; stakeName='—'; flag='—'; }
+
+    return { score: outScore, badge, color, flag, stakeName };
+  }
 
   const favName = match?.favName || 'Фаворит';
-  const header = `🔎 Вердикт: ${verdictTag} | Score ${v4.score01.toFixed(2)}`;
+  const oppName = match?.oppName || 'Аутсайдер';
+  const v5 = computeFinalVerdict_v5({
+    p_no_bt_3: Number.isFinite(fav?.p3) ? fav.p3 : undefined,
+    p_logistic_3: Number.isFinite(mlFav3) ? mlFav3 : undefined,
+    p_strength_3: Number.isFinite(fav?.p3) ? fav.p3 : undefined,
+    fci: Number.isFinite(fciFromUI) ? fciFromUI : undefined,
+    trend_delta: Number.isFinite(fav?.d3_5) ? fav.d3_5 : (Number.isFinite(fav?.d5_10) ? fav.d5_10 : 0),
+    sum_agree: Number.isFinite(sumAgree) ? sumAgree : undefined,
+    markov_topset: markovTop || undefined
+  }, { favName, undName: oppName });
+
+  let color = v5.color;
+  const stakeStr = (v5.stakeName && v5.stakeName !== '—' && (v5.flag === '🏆' || v5.flag === '🚩'))
+    ? `${v5.flag} ${v5.stakeName}`
+    : 'Ставка: —';
+  const header = `🎯 ${v5.score.toFixed(2)} | ${v5.badge} | ${stakeStr}`;
 
   // Values for compact extract block
   const favMl3Int = ok(mlFav3) ? Math.round(mlFav3) : null;
