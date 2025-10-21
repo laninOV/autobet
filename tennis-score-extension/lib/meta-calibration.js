@@ -71,6 +71,64 @@
     return { P_ML_final, P_TB_final, corr, key: M.key };
   }
 
-  window.MetaCalib = { loadMetaParams, predictWinnerAndTB, computeWinner, computeTB35 };
-})();
+  // ===== Two-sets verdict v5 (weights + adjustments) =====
+  function computeTwoSetsVerdict_v5(input){
+    try {
+      const {
+        favName = 'Фаворит',
+        undName = 'Аутсайдер',
+        prob_noBT = 0,
+        prob_h2h = 0,
+        prob_log = 0,
+        prob_form = 0,
+        fci = 0,
+        sum = null,
+        trend = 0,
+        markov_score = ''
+      } = input || {};
 
+      // Base (percent scale)
+      let base = 0
+        + 0.28 * (Number(prob_noBT) || 0)
+        + 0.25 * (Number(prob_form) || 0)
+        + 0.22 * (Number(fci) || 0)
+        + 0.15 * (Number(prob_h2h) || 0)
+        + 0.10 * (Number(prob_log) || 0);
+
+      // Adjustments (percent scale)
+      let adj = 0;
+      if (sum != null && Number(sum) < 50) adj -= 5;
+      if (Number(trend) < -10) adj -= 5;
+      if (Math.abs((Number(prob_noBT)||0) - (Number(prob_log)||0)) > 20) adj -= 5;
+      if (["3:0","3:1","3:2"].includes(String(markov_score))) adj += 4; else adj -= 6;
+
+      let scorePct = Math.max(0, Math.min(100, base + adj));
+      let score = scorePct / 100; // 0..1
+
+      // Verdict thresholds (optimized):
+      let verdict;
+      if (score >= 0.70) verdict = '✅ GO';
+      else if (score >= 0.60) verdict = '🟢 MID';
+      else if (score >= 0.53) verdict = '🟡 RISK';
+      else verdict = '🔴 PASS';
+
+      // Mirror mode (underdog +1.5) if favorite weak
+      const underdogHasSignal = (
+        (100 - (Number(prob_noBT)||0)) >= 60 ||
+        (100 - (Number(prob_log)||0)) >= 55 ||
+        (Number(trend) <= -10)
+      );
+      let stake = `🏆 ${favName}`;
+      if (score < 0.45 && underdogHasSignal) {
+        verdict = '🟢 GO';
+        stake = `🚩 ${undName}`;
+      }
+
+      return { score: +score.toFixed(2), scorePct: Math.round(score*100), verdict, stake };
+    } catch(_) {
+      return { score: 0.5, scorePct: 50, verdict: '🟡 RISK', stake: `🏆 ${input?.favName||'Фаворит'}` };
+    }
+  }
+
+  window.MetaCalib = { loadMetaParams, predictWinnerAndTB, computeWinner, computeTB35, computeTwoSetsVerdict_v5 };
+})();

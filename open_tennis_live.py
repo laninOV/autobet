@@ -1958,6 +1958,7 @@ def _format_tg_message_new(
                     p_no = _to_num(((cmp.get('nb3') or {}).get('fav') or {}).get('noH2H'))
                     p_log = _to_num((cmp.get('ml3') or {}).get('fav'))
                     p_str = _to_num((cmp.get('idx3') or {}).get('fav'))
+                    p_h2h = _to_num(((cmp.get('nb3') or {}).get('fav') or {}).get('h2h'))
                     fci_v = _to_num(cmp.get('fciPct'))
                     sum_ag = _to_num(cmp.get('committeePct'))
                     top = (cmp.get('mbt') or {}).get('bestScore')
@@ -1974,41 +1975,46 @@ def _format_tg_message_new(
                     pStr = norm(p_str)
                     fciN = norm(fci_v)
                     sumN = norm(sum_ag) if sum_ag is not None else None
-                    trendN = clamp01((dnum or 0.0)/100.0)
+                    trendV = dnum if (dnum is not None) else 0.0
 
-                    # Base score per prompt
-                    score = 0.30*pNo + 0.25*pLog + 0.20*pStr + 0.15*fciN + 0.10*trendN
-
-                    # Corrections
+                    # Base (percent scale) → normalize to 0..1
+                    # Compose base in percent space
+                    base_pct = (0.28*(pNo*100)) + (0.25*((p_str if p_str is not None else (pNo*100)))) + (0.22*(fciN*100)) + (0.15*((p_h2h or 0))) + (0.10*(pLog*100))
+                    score_pct = base_pct
+                    # Corrections in percent space
                     if sumN is not None and sumN < 0.50:
-                        score -= 0.05
-                    if dnum is not None and dnum < -10:
-                        score -= 0.05
-                    if (pNo > 0.60 and pLog < 0.45) or (pNo < 0.45 and pLog > 0.60):
-                        score -= 0.10
+                        score_pct -= 5
+                    if trendV < -10:
+                        score_pct -= 5
+                    if abs((pNo*100) - (pLog*100)) > 20:
+                        score_pct -= 5
                     if isinstance(top, str) and top in { '3:0','3:1','3:2' }:
-                        score += 0.04
-                    elif isinstance(top, str) and top in { '0:3','1:3','2:3' }:
-                        score -= 0.06
+                        score_pct += 4
+                    else:
+                        score_pct -= 6
+                    score = clamp01((score_pct)/100.0)
 
-                    score = clamp01(score)
-
-                    # Underdog proxy score (mirrored composite)
-                    und = clamp01(0.30*(1-pLog) + 0.25*(1-pNo) + 0.20*(1-pStr) + 0.15*(1-fciN) + 0.10*(1-trendN)
-                                   + (0.06 if (isinstance(top,str) and top in {'0:3','1:3','2:3'}) else (-0.04 if (isinstance(top,str) and top in {'3:0','3:1','3:2'}) else 0.0)))
+                    # Underdog activation rule (proxy signals)
+                    und_no = _to_num(((cmp.get('nb3') or {}).get('opp') or {}).get('noH2H'))
+                    und_log = _to_num((cmp.get('ml3') or {}).get('opp'))
+                    underdog_has_signal = (
+                        (und_no is not None and und_no >= 60) or
+                        (und_log is not None and und_log >= 55) or
+                        (trendV <= -10)
+                    )
 
                     # Decide badge and stake per prompt
                     badge = '🔴 PASS'
                     flag = '—'
                     stake = '—'
                     out_score = score
-                    if score >= 0.85:
+                    if score >= 0.70:
                         badge = '✅ GO'; flag = '🏆'; stake = fav_name
-                    elif score >= 0.70:
+                    elif score >= 0.60:
                         badge = '🟢 MID'; flag = '🏆'; stake = fav_name
-                    elif score >= 0.55:
+                    elif score >= 0.53:
                         badge = '🟡 RISK'; flag = '🏆'; stake = fav_name
-                    elif score < 0.45 and und >= 0.60:
+                    elif score < 0.45 and underdog_has_signal:
                         badge = '🟢 GO'; flag = '🚩'; stake = opp_name; out_score = score
                     else:
                         badge = '🔴 PASS'; flag = '—'; stake = '—'

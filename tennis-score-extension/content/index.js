@@ -338,37 +338,65 @@ function renderMinTwoSets(match) {
 
   function computeFinalVerdict_v5(inp, names){
     const clamp01 = (x)=> Math.max(0, Math.min(1, x));
-    const norm = (v)=> (typeof v === 'number' && isFinite(v)) ? clamp01(v/100) : 0;
-    const pNo = norm(inp.p_no_bt_3);
-    const pLog = norm(inp.p_logistic_3);
-    const pStr = norm(inp.p_strength_3);
-    const fci = norm(inp.fci);
-    const trend = (typeof inp.trend_delta === 'number' && isFinite(inp.trend_delta)) ? clamp01(inp.trend_delta/100) : 0;
-    const sum = norm(inp.sum_agree);
-    const top = String(inp.markov_topset||'');
-
-    let score = 0.30*pNo + 0.25*pLog + 0.20*pStr + 0.15*fci + 0.10*trend;
-    if (sum < 0.50 && sum > 0) score -= 0.05;
-    if (inp.trend_delta != null && inp.trend_delta < -10) score -= 0.05;
-    if ((pNo > 0.60 && pLog < 0.45) || (pNo < 0.45 && pLog > 0.60)) score -= 0.10;
-    if (['3:0','3:1','3:2'].includes(top)) score += 0.04;
-    else if (['0:3','1:3','2:3'].includes(top)) score -= 0.06;
-    score = clamp01(score);
-
-    // Underdog mirror score (use our earlier UndScore style as proxy)
-    const und = clamp01(
-      0.30*(1-pLog) + 0.25*(1-pNo) + 0.20*(1-pStr) + 0.15*(1-fci) + 0.10*(1-trend)
-      + (['0:3','1:3','2:3'].includes(top) ? 0.06 : (['3:0','3:1','3:2'].includes(top) ? -0.04 : 0))
-    );
-
     const favName = names.favName||'Фаворит';
     const undName = names.undName||'Аутсайдер';
+    // Try to read H2H(3) for favorite from nb3 row if not provided
+    let prob_h2h = (typeof inp.p_h2h_3 === 'number') ? inp.p_h2h_3 : null;
+    if (prob_h2h == null) {
+      try {
+        const nbFav = document.querySelector('.min2-compare .cmp-row.nb3 .fav.nb3');
+        if (nbFav) {
+          const t = (nbFav.innerText||nbFav.textContent||'');
+          const m = t.match(/с\s*H2H\s*(\d{1,3})%/i);
+          if (m) { const v = Number(m[1]); if (isFinite(v)) prob_h2h = v; }
+        }
+      } catch(_) {}
+    }
+
+    // Base (percent scale)
+    const prob_noBT = Number.isFinite(inp.p_no_bt_3)? inp.p_no_bt_3 : 0;
+    const prob_log  = Number.isFinite(inp.p_logistic_3)? inp.p_logistic_3 : 0;
+    const prob_form = Number.isFinite(inp.p_strength_3)? inp.p_strength_3 : prob_noBT;
+    const fci       = Number.isFinite(inp.fci)? inp.fci : 0;
+    const sum       = Number.isFinite(inp.sum_agree)? inp.sum_agree : null;
+    const trend     = Number.isFinite(inp.trend_delta)? inp.trend_delta : 0;
+    const top       = String(inp.markov_topset||'');
+    const p_h2h     = Number.isFinite(prob_h2h)? prob_h2h : 0;
+
+    let base = 0
+      + 0.28 * prob_noBT
+      + 0.25 * prob_form
+      + 0.22 * fci
+      + 0.15 * p_h2h
+      + 0.10 * prob_log;
+    let adj = 0;
+    if (sum != null && sum < 50) adj -= 5;
+    if (trend < -10) adj -= 5;
+    if (Math.abs(prob_noBT - prob_log) > 20) adj -= 5;
+    if (['3:0','3:1','3:2'].includes(top)) adj += 4; else adj -= 6;
+    let scorePct = Math.max(0, Math.min(100, base + adj));
+    let score = scorePct / 100;
+
     let badge = '🔴 PASS', color = '#a00', outScore = score, stakeName = '—', flag='—';
-    if (score >= 0.85) { badge='✅ GO'; color='#059669'; stakeName=favName; flag='🏆'; }
-    else if (score >= 0.70) { badge='🟢 MID'; color='#16a34a'; stakeName=favName; flag='🏆'; }
-    else if (score >= 0.55) { badge='🟡 RISK'; color='#ca8a04'; stakeName=favName; flag='🏆'; }
-    else if (score < 0.45 && und >= 0.60) { badge='🟢 GO'; color='#16a34a'; outScore=score; stakeName=undName; flag='🚩'; }
-    else { badge='🔴 PASS'; color='#a00'; stakeName='—'; flag='—'; }
+    if (score >= 0.70) { badge='✅ GO'; color='#059669'; stakeName=favName; flag='🏆'; }
+    else if (score >= 0.60) { badge='🟢 MID'; color='#16a34a'; stakeName=favName; flag='🏆'; }
+    else if (score >= 0.53) { badge='🟡 RISK'; color='#ca8a04'; stakeName=favName; flag='🏆'; }
+    else {
+      // Mirror mode — simple underdog signals
+      let und_no = null, und_log = null;
+      try {
+        const nbOpp = document.querySelector('.min2-compare .cmp-row.nb3 .opp.nb3');
+        if (nbOpp) {
+          const t=(nbOpp.innerText||nbOpp.textContent||'');
+          const m=t.match(/без\s*H2H\s*(\d{1,3})%/i); if (m) und_no = Number(m[1]);
+        }
+        const el=document.querySelector('.min2-compare .cmp-row.ml3 .opp.ml3');
+        if (el) { const m=(el.innerText||el.textContent||'').match(/(\d{1,3})%/); if (m) und_log = Number(m[1]); }
+      } catch(_) {}
+      const hasSignal = ((und_no!=null && und_no>=60) || (und_log!=null && und_log>=55) || (trend<=-10));
+      if (score < 0.45 && hasSignal) { badge='🟢 GO'; color='#16a34a'; stakeName=undName; flag='🚩'; }
+      else { badge='🔴 PASS'; color='#a00'; stakeName='—'; flag='—'; }
+    }
 
     return { score: outScore, badge, color, flag, stakeName };
   }
