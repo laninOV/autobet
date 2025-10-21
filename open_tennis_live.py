@@ -335,6 +335,8 @@ def _load_known_leagues_from_disk() -> None:
         pass
 
 
+HIDE_PASS = False
+
 def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
 
@@ -357,15 +359,21 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
-        # Force allowed leagues per requested policy:
-        # always include "Кубок ТТ" and "Лига Про";
-        # include "Сетка Кап" only when --setka or AUTOBET_SETKA is provided
+        # Allowed leagues policy:
+        # If user provided positional filters, use them; otherwise use defaults and optional --setka
         try:
             env_setka = os.getenv('AUTOBET_SETKA')
             want_setka = bool(getattr(args, 'setka', False)) or (env_setka is not None and str(env_setka).strip().lower() not in ('', '0', 'false', 'no'))
         except Exception:
             want_setka = False
-        filters = ["Кубок ТТ", "Лига Про"] + (["Сетка Кап"] if want_setka else [])
+        try:
+            user_filters = getattr(args, 'filters', None)
+        except Exception:
+            user_filters = None
+        if user_filters:
+            filters = list(user_filters)
+        else:
+            filters = ["Кубок ТТ", "Лига Про"] + (["Сетка Кап"] if want_setka else [])
 
         # Учитываем флаг all: отключаем фильтрацию турниров и сохраняем все матчи
         try:
@@ -387,6 +395,13 @@ def run(filters: List[str]) -> None:
 
         # Подгружаем известные лиги с диска (если есть сохранённый список)
         _load_known_leagues_from_disk()
+
+        # Hide PASS option
+        try:
+            global HIDE_PASS
+            HIDE_PASS = bool(getattr(args, 'hide_pass', False) or (os.getenv('AUTOBET_HIDE_PASS') not in (None, '', '0', 'false', 'False')))
+        except Exception:
+            pass
 
         # Setup Telegram sender if requested
         try:
@@ -710,6 +725,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Жёсткая перезагрузка live-страницы перед каждым циклом сканирования
     parser.add_argument("--reload", dest="reload", action="store_true",
                         help="Перезагружать live_v2 перед каждым фоновым циклом (на случай если список не обновляется)")
+    # Фильтр по вердикту: скрывать PASS из уведомлений
+    parser.add_argument("--hide-pass", dest="hide_pass", action="store_true",
+                        help="Не отправлять уведомления для матчей с вердиктом 🔴 PASS")
     return parser
 
 
@@ -1162,7 +1180,9 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                             except Exception:
                                 pass
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, h2h_score, league=league)
-                        _TG_SENDER(msg)
+                        # Optional filter: skip PASS verdicts
+                        if not (HIDE_PASS and (' | 🔴 PASS |' in msg or msg.strip().endswith('🔴 PASS | Ставка: —'))):
+                            _TG_SENDER(msg)
                 except Exception:
                     pass
                 processed.add(url)  # помечаем как обработанный только при успешном сохранении
