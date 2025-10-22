@@ -71,7 +71,7 @@
     return { P_ML_final, P_TB_final, corr, key: M.key };
   }
 
-  // ===== Two-sets verdict v5 (weights + adjustments) =====
+  // ===== Two-sets verdict v5.4 (weights + adjustments) =====
   function computeTwoSetsVerdict_v5(input){
     try {
       const {
@@ -97,7 +97,9 @@
 
       // Adjustments (percent scale)
       let adj = 0;
-      if (sum != null && Number(sum) < 50) adj -= 5;
+      // v5.4: SUM anomaly penalty — stronger and symmetric for low/high SUM
+      // ↓ Слишком низкий (<50) или слишком высокий (>80) SUM — матч нестабилен
+      if (sum != null && (Number(sum) < 50 || Number(sum) > 80)) adj -= 8; // -0.08
       if (Number(trend) < -10) adj -= 5;
       if (Math.abs((Number(prob_noBT)||0) - (Number(prob_log)||0)) > 20) adj -= 5;
       if (["3:0","3:1","3:2"].includes(String(markov_score))) adj += 4; else adj -= 6;
@@ -105,11 +107,26 @@
       let scorePct = Math.max(0, Math.min(100, base + adj));
       let score = scorePct / 100; // 0..1
 
+      // v5.4: Overrated favorite penalty — high FCI but weak SUM
+      // ↓ Завышенные фавориты: FCI > 70 и SUM < 60 — сильнее штрафуем
+      if (Number(fci) > 70 && sum != null && Number(sum) < 60) {
+        score = Math.max(0, score - 0.10);
+      }
+
+      // v5.4: Pseudo-3:0 correction — BT says 3:0 but integrated score < 0.65
+      if (String(markov_score) === '3:0' && score < 0.65) {
+        score = Math.max(0, score - 0.07);
+      }
+
+      // Recompute percent after post-adjustments
+      scorePct = Math.round(Math.max(0, Math.min(1, score)) * 100);
+
       // Verdict thresholds (optimized):
       let verdict;
-      if (score >= 0.70) verdict = '✅ GO';
+      // v5.4 — 0.72 / 0.60 / 0.52
+      if (score >= 0.72) verdict = '✅ GO';
       else if (score >= 0.60) verdict = '🟢 MID';
-      else if (score >= 0.53) verdict = '🟡 RISK';
+      else if (score >= 0.52) verdict = '🟡 RISK';
       else verdict = '🔴 PASS';
 
       // Mirror mode (underdog +1.5) if favorite weak
@@ -119,9 +136,15 @@
         (Number(trend) <= -10)
       );
       let stake = `🏆 ${favName}`;
-      if (score < 0.45 && underdogHasSignal) {
-        verdict = '🟢 GO';
-        stake = `🚩 ${undName}`;
+      if (score < 0.45) {
+        // v5.4: If SUM > 70 — not a flipped match; ignore mirror GO
+        if (sum != null && Number(sum) > 70) {
+          verdict = '🔴 PASS';
+          stake = '—';
+        } else if (underdogHasSignal) {
+          verdict = '🟢 GO';
+          stake = `🚩 ${undName}`;
+        }
       }
 
       return { score: +score.toFixed(2), scorePct: Math.round(score*100), verdict, stake };

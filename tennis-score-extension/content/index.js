@@ -370,17 +370,29 @@ function renderMinTwoSets(match) {
       + 0.15 * p_h2h
       + 0.10 * prob_log;
     let adj = 0;
-    if (sum != null && sum < 50) adj -= 5;
+    // v5.4: SUM anomaly penalty — apply stronger and symmetric bounds
+    if (sum != null && (sum < 50 || sum > 80)) adj -= 8; // -0.08
     if (trend < -10) adj -= 5;
     if (Math.abs(prob_noBT - prob_log) > 20) adj -= 5;
     if (['3:0','3:1','3:2'].includes(top)) adj += 4; else adj -= 6;
     let scorePct = Math.max(0, Math.min(100, base + adj));
     let score = scorePct / 100;
 
+    // v5.4: Overrated favorite penalty (FCI high, SUM weak)
+    if (fci > 70 && (sum != null && sum < 60)) {
+      score = Math.max(0, score - 0.10);
+    }
+
+    // v5.4: Pseudo-3:0 correction
+    if (top === '3:0' && score < 0.65) {
+      score = Math.max(0, score - 0.07);
+    }
+
     let badge = '🔴 PASS', color = '#a00', outScore = score, stakeName = '—', flag='—';
-    if (score >= 0.70) { badge='✅ GO'; color='#059669'; stakeName=favName; flag='🏆'; }
+    // v5.4 thresholds
+    if (score >= 0.72) { badge='✅ GO'; color='#059669'; stakeName=favName; flag='🏆'; }
     else if (score >= 0.60) { badge='🟢 MID'; color='#16a34a'; stakeName=favName; flag='🏆'; }
-    else if (score >= 0.53) { badge='🟡 RISK'; color='#ca8a04'; stakeName=favName; flag='🏆'; }
+    else if (score >= 0.52) { badge='🟡 RISK'; color='#ca8a04'; stakeName=favName; flag='🏆'; }
     else {
       // Mirror mode — simple underdog signals
       let und_no = null, und_log = null;
@@ -394,7 +406,9 @@ function renderMinTwoSets(match) {
         if (el) { const m=(el.innerText||el.textContent||'').match(/(\d{1,3})%/); if (m) und_log = Number(m[1]); }
       } catch(_) {}
       const hasSignal = ((und_no!=null && und_no>=60) || (und_log!=null && und_log>=55) || (trend<=-10));
-      if (score < 0.45 && hasSignal) { badge='🟢 GO'; color='#16a34a'; stakeName=undName; flag='🚩'; }
+      // v5.4: If SUM > 70 — it's not a flipped match; ignore mirror GO
+      if (score < 0.45 && (sum != null && sum > 70)) { badge='🔴 PASS'; color='#a00'; stakeName='—'; flag='—'; }
+      else if (score < 0.45 && hasSignal) { badge='🟢 GO'; color='#16a34a'; stakeName=undName; flag='🚩'; }
       else { badge='🔴 PASS'; color='#a00'; stakeName='—'; flag='—'; }
     }
 
