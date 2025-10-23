@@ -1,3 +1,6 @@
-2025/10/23-18:20:18.873 9af4b Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/MANIFEST-000001
-2025/10/23-18:20:18.874 9af4b Recovering log #64
-2025/10/23-18:20:18.876 9af4b Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000064.log 
+2025/10/23-18:22:30.177 9b952 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/MANIFEST-000001
+2025/10/23-18:22:30.178 9b952 Recovering log #64
+2025/10/23-18:22:30.180 9b952 Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Session Storage/000064.log 
+2025/10/23-18:26:23.250 9b952 Level-0 table #68: started
+2025/10/23-18:26:23.253 9b952 Level-0 table #68: 23153 bytes OK
+2025/10/23-18:26:23.256 9b952 Delete type=0 #64

@@ -1617,13 +1617,24 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
             lp, rp = parse_players_from_stats_url(url)
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+            # Server-safe fallback: если расширение отключено и DOM не дал имена,
+            # но в URL есть lp/rp — используем их, даже если не смогли распарсить со страницы
+            if not (fav and opp):
+                if lp and rp:
+                    fav, opp = lp, rp
+                elif lp and not opp:
+                    fav, opp = lp, (opp or 'Оппонент')
+                elif rp and not fav:
+                    fav, opp = (fav or 'Фаворит'), rp
             # Если не нашли сразу — краткая повторная попытка
             if not (fav and opp and reason):
                 try:
                     page.wait_for_timeout(min(2000, max(500, DECISION_WAIT_MS // 2)))
                 except Exception:
                     pass
-                fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+                fav2, opp2, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+                if fav2 and opp2:
+                    fav, opp = fav2, opp2
             if fav and opp and (reason or ALLOW_ALL or ALLOW_NOTIFY_ALL):
                 # Извлечь метрики для новой строки CSV
                 metrics = _extract_metrics_for_csv(page, fav, opp)
