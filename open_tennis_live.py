@@ -81,7 +81,9 @@ _SCAN_LOCK = threading.Lock()
 # Global runtime switches
 _IGNORE_PROCESSED = False
 # Разрешить отправку всех матчей (игнорировать GO/3/3/2/3), но сохранять фильтр турниров
-ALLOW_NOTIFY_ALL = False
+# По умолчанию шлём все подходящие матчи из разрешённых лиг,
+# чтобы не требовать от пользователя каждый раз указывать --notify-all
+ALLOW_NOTIFY_ALL = True
 
 # Глобальный список известных лиг (собираем с live_v2 и переиспользуем на странице статистики)
 _KNOWN_LEAGUES: List[str] = []
@@ -2815,13 +2817,45 @@ def _format_tg_message_new(
 
     # Fallback to old format
     no_bt_3, with_h2h_3, log3, idx3 = fallback_metrics
-    line1 = ts + (f" {league}" if league else "")
-    line2 = f"{fav} VS {opp}"
-    lstr = (f"{log3:.0f}%" if isinstance(log3, (int, float)) else "-")
-    istr = (f"{idx3:.0f}%" if isinstance(idx3, (int, float)) else "-")
-    line3 = f"{lstr} {istr}"
-    line4 = _canonical_stats_url(url)
-    return "\n".join([line1, line2, line3, line4])
+    # Красивый fallback без расширения: нормальный заголовок, мини‑таблица, ссылка и счёт
+    try:
+        def esc(s: str) -> str:
+            return (s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') if isinstance(s, str) else s)
+        hdr = f"⏱ {ts}" + (f" {esc(league)}" if league else "")
+        title = f"🏆 {esc(fav)} VS  🚩{esc(opp)}"
+        # Мини‑таблица, если есть хоть какие‑то числа
+        def fmt0(v):
+            try:
+                return f"{float(v):.0f}%"
+            except Exception:
+                return '—'
+        rows = []
+        if any(isinstance(x, (int, float)) for x in (no_bt_3, with_h2h_3, log3, idx3)):
+            rows.append(f"👤 {fmt0(no_bt_3)} | {fmt0(with_h2h_3)}")
+            rows.append(f"📊 {fmt0(log3)} | {fmt0(idx3)}")
+        block = ("<pre>" + esc("\n".join(rows)) + "</pre>") if rows else ''
+        link = esc(_canonical_stats_url(url))
+        # Мини‑вердикт‑заглушка: ставка по умолчанию на фаворита (для стабильной разметки)
+        final_line = f"🎯 {'—'} | {'—'} | 🏆 {esc(fav)}"
+        parts = [
+            esc(hdr),
+            esc(title),
+            block,
+            f"<a href=\"{link}\">Статистика</a>",
+            final_line,
+        ]
+        # Если передан live_score (в параметре h2h_score), вставим его сразу
+        if h2h_score:
+            try:
+                sline = _compose_score_with_sets(_canonical_stats_url(url), h2h_score)
+                parts.append(esc(f"📟 Счёт: {sline}"))
+            except Exception:
+                parts.append(esc(f"📟 Счёт: {h2h_score}"))
+        return "\n".join([p for p in parts if p])
+    except Exception:
+        # Совсем минимальная страховка
+        link = _canonical_stats_url(url)
+        return "\n".join([ts, f"{fav} VS {opp}", link])
 
 
 def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Optional[float], Optional[float], Optional[float], Optional[float]], output_csv: str, **_ignored) -> None:

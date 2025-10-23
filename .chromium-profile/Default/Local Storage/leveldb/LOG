@@ -1,3 +1,8 @@
-2025/10/23-19:15:44.386 a2d9e Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/MANIFEST-000001
-2025/10/23-19:15:44.388 a2d9e Recovering log #237
-2025/10/23-19:15:44.388 a2d9e Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/000237.log 
+2025/10/23-21:11:29.203 ba34b Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2025/10/23-21:11:29.204 ba34b Recovering log #237
+2025/10/23-21:11:29.205 ba34b Level-0 table #240: started
+2025/10/23-21:11:29.210 ba34b Level-0 table #240: 13589 bytes OK
+2025/10/23-21:11:29.212 ba34b Delete type=0 #237
+2025/10/23-21:15:35.734 ba34e Level-0 table #243: started
+2025/10/23-21:15:35.737 ba34e Level-0 table #243: 13417 bytes OK
+2025/10/23-21:15:35.738 ba34e Delete type=0 #241
