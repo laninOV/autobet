@@ -938,8 +938,86 @@ function renderFavOppCompare(payload) {
     document.documentElement.appendChild(btn);
   };
 
+  // --------- Live panel for /live_v2 ---------
+  const runLivePanel = () => {
+    try { if (!/\/live_v2\/?/i.test(location.pathname)) return; } catch { return; }
+    const PANEL_ID = 'tsx-live-panel';
+    const byUrl = new Map();
+    const $row = (a) => a.closest('tr') || a.closest('[role="row"]') || a.closest('.row') || a.closest('li') || a.closest('.match') || a.parentElement;
+    const parseScoreFromMob = (row) => {
+      const td = row && row.querySelector('td.td-mob.mob-score, .td-mob.mob-score, .mob-score');
+      const blocks = td ? Array.from(td.querySelectorAll('.score')).slice(0,2) : [];
+      if (!blocks.length) return null;
+      const readSum = (b)=>{ const d=b&&b.querySelector('.sum'); const t=d&&(d.textContent||'').trim(); const n=parseInt(t,10); return Number.isFinite(n)? n : null; };
+      const sA = readSum(blocks[0]); const sB = readSum(blocks[1]);
+      if (sA==null || sB==null) return null;
+      const setsA = blocks[0]? Array.from(blocks[0].querySelectorAll('.set')).map(x=>(x.textContent||'').trim()):[];
+      const setsB = blocks[1]? Array.from(blocks[1].querySelectorAll('.set')).map(x=>(x.textContent||'').trim()):[];
+      const n = Math.min(setsA.length, setsB.length);
+      const pairs = []; for(let i=0;i<n;i++){ pairs.push(`${setsA[i]}:${setsB[i]}`); }
+      while (pairs.length && /^0\s*:\s*0$/.test(pairs[pairs.length-1])) pairs.pop();
+      const finished = (sA===3 || sB===3);
+      return { score: `${sA}:${sB}`, pairs, finished };
+    };
+    const parseNamesFromHref = (a) => {
+      try {
+        const u = new URL(a.getAttribute('href') || a.href, location.origin);
+        const lp = u.searchParams.get('lp');
+        const rp = u.searchParams.get('rp');
+        return { left: lp||'', right: rp||'' };
+      } catch { return { left:'', right:'' }; }
+    };
+    const collect = () => {
+      const anchors = Array.from(document.querySelectorAll("a[href*='/stats/?']"));
+      for (const a of anchors) {
+        const row = $row(a);
+        const url = (a.getAttribute('href') || a.href) ? new URL(a.getAttribute('href') || a.href, location.origin).href : null;
+        if (!url) continue;
+        const nm = parseNamesFromHref(a);
+        const sc = parseScoreFromMob(row);
+        const val = byUrl.get(url) || { url, names: nm, score: null, sets: [], finished: false, row };
+        if (sc) { val.score = sc.score; val.sets = sc.pairs; val.finished = sc.finished; }
+        val.row = row; val.names = nm;
+        byUrl.set(url, val);
+      }
+      return Array.from(byUrl.values());
+    };
+    const ensurePanel = () => {
+      let box = document.getElementById(PANEL_ID);
+      if (!box) { box = document.createElement('div'); box.id = PANEL_ID; document.body.appendChild(box); }
+      return box;
+    };
+    const render = () => {
+      const list = collect();
+      const box = ensurePanel();
+      const lines = [];
+      for (const it of list) {
+        const names = `${it.names.left || '?'} vs ${it.names.right || '?'}`;
+        const score = it.score ? it.score : '—:—';
+        const sets = it.sets && it.sets.length? ` (${it.sets.join(', ')})` : '';
+        lines.push(`<div class=\"row\" data-url=\"${(it.url||"" ).replace(/"/g, "&quot;")}\" data-score=\"${score}\" data-finished=\"${it.finished?"1":"0"}\" data-sets=\"${(it.sets||[]).join("|")}\" ><div class=\"names\">${names}</div><div class=\"score\">${score}</div><div class=\"sets\">${sets}</div></div>`);
+        try {
+          if (it.row && it.score) {
+            const a = it.row.querySelector("a[href*='/stats/?']");
+            if (a) {
+              let b = a.parentElement && a.parentElement.querySelector('.tsx-inline-score');
+              if (!b) { b = document.createElement('span'); b.className = 'tsx-inline-score'; a.parentElement && a.parentElement.appendChild(b); }
+              b.textContent = it.score;
+            }
+          }
+        } catch(_){}
+      }
+      box.innerHTML = lines.length ? lines.join('') : '<div class="row"><div class="names">Нет активных матчей</div></div>';
+    };
+    render();
+    const mo = new MutationObserver(() => { requestAnimationFrame(render); });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    setInterval(render, 2000);
+  };
+
   const install = () => {
     ensureButton();
+    try { runLivePanel(); } catch {}
     // If a previous version injected summaries, remove them to restore original page
     try {
       const ex = document.getElementById('tsx-auto-summaries');

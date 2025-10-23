@@ -78,12 +78,264 @@ DEFAULT_FILTERS = [
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
 _SCAN_LOCK = threading.Lock()
+# Global runtime switches
+_IGNORE_PROCESSED = False
 # Разрешить отправку всех матчей (игнорировать GO/3/3/2/3), но сохранять фильтр турниров
 ALLOW_NOTIFY_ALL = False
 
 # Глобальный список известных лиг (собираем с live_v2 и переиспользуем на странице статистики)
 _KNOWN_LEAGUES: List[str] = []
 _LEAGUE_BY_URL: Dict[str, str] = {}
+_ALLOWED_TOURNAMENTS: List[str] = []
+_LIVE_SCORE_BY_URL: Dict[str, str] = {}
+_LIVE_FINISHED_BY_URL: Dict[str, bool] = {}
+_TG_MSG_BY_URL: Dict[str, int] = {}
+_MATCH_DONE: Set[str] = set()
+_LAST_TG_TEXT_BY_URL: Dict[str, str] = {}
+_LIVE_SETS_BY_URL: Dict[str, List[str]] = {}
+_LIVE_NAMES_BY_URL: Dict[str, List[str]] = {}
+_LIVE_FAV_IS_LEFT_BY_URL: Dict[str, bool] = {}
+_LIVE_LR_BY_URL: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+_SHOW_DETAILS = False
+
+# Telegram API helpers (send/edit)
+_TG_TOKEN: Optional[str] = None
+_TG_CHAT_ID: Optional[str] = None
+_TG_MSG_MAP_FILE = os.path.join(os.path.dirname(__file__), ".tg_msg_map.json")
+
+def _load_tg_map():
+    try:
+        if os.path.exists(_TG_MSG_MAP_FILE):
+            with open(_TG_MSG_MAP_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    try:
+                        if isinstance(v, dict):
+                            mid = v.get('id'); txt = v.get('text')
+                            if isinstance(mid, int):
+                                _TG_MSG_BY_URL[k] = mid
+                            if isinstance(txt, str):
+                                _LAST_TG_TEXT_BY_URL[k] = txt
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+def _save_tg_map():
+    try:
+        out = {}
+        for k, mid in _TG_MSG_BY_URL.items():
+            try:
+                out[k] = { 'id': mid, 'text': _LAST_TG_TEXT_BY_URL.get(k) }
+            except Exception:
+                out[k] = { 'id': mid, 'text': None }
+        with open(_TG_MSG_MAP_FILE, 'w', encoding='utf-8') as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
+    """Send or edit a Telegram message per match URL.
+    - Sends a new message on first encounter, stores message_id
+    - Edits the message on subsequent updates
+    - On finish flag, appends final marker and stops further edits
+    """
+    try:
+        if not (_TG_TOKEN and _TG_CHAT_ID):
+            return
+        if url in _MATCH_DONE:
+            return
+        canon = _canonical_stats_url(url)
+        mid = _TG_MSG_BY_URL.get(url) or _TG_MSG_BY_URL.get(canon)
+        _send = globals().get('_tg_send')
+        _edit = globals().get('_tg_edit')
+        if mid:
+            ok = False
+            if callable(_edit):
+                ok = bool(_edit(mid, text))
+            if not ok and callable(_send):
+                new_id = _send(text)
+                if isinstance(new_id, int):
+                    _TG_MSG_BY_URL[url] = new_id
+                    _TG_MSG_BY_URL[canon] = new_id
+                    mid = new_id
+                    _save_tg_map()
+        else:
+            if callable(_send):
+                new_id = _send(text)
+                if isinstance(new_id, int):
+                    _TG_MSG_BY_URL[url] = new_id
+                    _TG_MSG_BY_URL[canon] = new_id
+                    mid = new_id
+                    _save_tg_map()
+        # persist last text
+        if mid and isinstance(text, str):
+            _LAST_TG_TEXT_BY_URL[url] = text
+            _LAST_TG_TEXT_BY_URL[canon] = text
+            _save_tg_map()
+        if finished and mid:
+            # Add final marker once
+            final_text = text
+            if '🏁' not in text:
+                final_text = text + "\n🏁 Игра завершена"
+            if callable(_edit):
+                _edit(mid, final_text)
+                _LAST_TG_TEXT_BY_URL[url] = final_text
+                _LAST_TG_TEXT_BY_URL[canon] = final_text
+                _save_tg_map()
+            _MATCH_DONE.add(url)
+    except Exception:
+        pass
+
+def _inject_or_replace_score(text: str, score: str) -> str:
+    try:
+        lines = (text or '').splitlines()
+        replaced = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith('📟'):
+                lines[i] = f"📟 Счёт: {score}"
+                replaced = True
+                # ensure a blank line before the score line for readability
+                try:
+                    if i > 0 and lines[i-1].strip() != '':
+                        lines.insert(i, '')
+                except Exception:
+                    pass
+                break
+        if not replaced:
+            # insert strictly after the last verdict line starting with '🎯'
+            insert_at = None
+            for i in range(len(lines)-1, -1, -1):
+                if lines[i].lstrip().startswith('🎯'):
+                    insert_at = i + 1
+                    break
+            if insert_at is None:
+                # fallback: append at end
+                insert_at = len(lines)
+            # add a blank line before the score for readability
+            try:
+                if insert_at <= len(lines) and (insert_at == len(lines) or lines[insert_at].strip() != ''):
+                    lines.insert(insert_at, '')
+                    insert_at += 1
+            except Exception:
+                pass
+            lines.insert(insert_at, f"📟 Счёт: {score}")
+        return "\n".join(lines)
+    except Exception:
+        return text
+
+def _compose_score_with_sets(url: str, base_score: Optional[str]) -> Optional[str]:
+    try:
+        s = base_score or _LIVE_SCORE_BY_URL.get(url)
+        if not s:
+            return None
+        # Clean and trim pairs (remove trailing 0:0)
+        def clean(ps):
+            if not isinstance(ps, list):
+                return []
+            out = []
+            for it in ps:
+                try:
+                    a,b = str(it).split(':',1)
+                    out.append(f"{a.strip()}:{b.strip()}")
+                except Exception:
+                    continue
+            while out and re.match(r"^0\s*:\s*0$", out[-1]):
+                out.pop()
+            return out
+        sets = clean(_LIVE_SETS_BY_URL.get(url))
+        # Optional status marker for favorite
+        marker = None
+        try:
+            # decide favorite set count orientation if known
+            fav_left = _LIVE_FAV_IS_LEFT_BY_URL.get(url)
+            if fav_left is not None:
+                try:
+                    a, b = s.split(':', 1)
+                    sa = int(str(a).strip()); sb = int(str(b).strip())
+                    fav_sets = sa if fav_left else sb
+                    opp_sets = sb if fav_left else sa
+                    finished = bool(_LIVE_FINISHED_BY_URL.get(url))
+                    if fav_sets >= 3:
+                        marker = '✅'
+                    elif fav_sets >= 2:
+                        marker = '🟡'
+                    else:
+                        # if завершён и фаворит <2 — точно ❌, иначе пока нет 2 — ❌ (живое)
+                        marker = '❌'
+                    # Re-orient entire score and sets to Fav:Opp if fav is on the right
+                    if fav_left is False:
+                        # swap score
+                        s = f"{sb}:{sa}"
+                        # swap every pair in sets
+                        new_sets = []
+                        for p in sets:
+                            try:
+                                x,y = p.split(':',1)
+                                new_sets.append(f"{y}:{x}")
+                            except Exception:
+                                new_sets.append(p)
+                        sets = new_sets
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        core = s
+        if sets:
+            core = f"{s} (" + ", ".join(sets) + ")"
+        if marker:
+            core = f"{core} {marker}"
+        return core
+    except Exception:
+        return base_score
+
+def _refresh_live_scores(urls: List[str]) -> None:
+    if not (_TG_TOKEN and _TG_CHAT_ID):
+        return
+    _edit = globals().get('_tg_edit')
+    if not callable(_edit):
+        return
+    for url in urls:
+        try:
+            if url in _MATCH_DONE:
+                continue
+            mid = _TG_MSG_BY_URL.get(url)
+            canon = _canonical_stats_url(url)
+            if not mid:
+                mid = _TG_MSG_BY_URL.get(canon)
+            composed = _compose_score_with_sets(canon, _LIVE_SCORE_BY_URL.get(canon) or _LIVE_SCORE_BY_URL.get(url))
+            if not composed:
+                continue
+            old = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
+            if not old or not mid:
+                # нет базового сообщения — пропускаем
+                if os.getenv('AUTOBET_DEBUG'):
+                    try:
+                        print(f"[edit-skip] no base msg for {canon}")
+                    except Exception:
+                        pass
+                continue
+            new_text = _inject_or_replace_score(old, composed)
+            finished = bool(_LIVE_FINISHED_BY_URL.get(canon) or _LIVE_FINISHED_BY_URL.get(url))
+            if finished and '🏁' not in new_text:
+                new_text = new_text + "\n🏁 Игра завершена"
+            if new_text != old:
+                ok = _edit(mid, new_text)
+                if os.getenv('AUTOBET_DEBUG'):
+                    try:
+                        print(f"[edit] {canon} score='{composed}' ok={ok}")
+                    except Exception:
+                        pass
+                if ok:
+                    _LAST_TG_TEXT_BY_URL[url] = new_text
+                    _LAST_TG_TEXT_BY_URL[canon] = new_text
+                    _TG_MSG_BY_URL[canon] = mid
+                    _save_tg_map()
+                    if finished:
+                        _MATCH_DONE.add(url)
+        except Exception:
+            continue
 
 
 CONTROL_JS = r"""
@@ -346,6 +598,11 @@ def run(filters: List[str]) -> None:
     _init_output_files()
 
     with sync_playwright() as p:
+        # Load persisted Telegram message ids/texts to allow edits across restarts
+        try:
+            _load_tg_map()
+        except Exception:
+            pass
         ext_path = os.path.expanduser(args.extension_path) if hasattr(args, "extension_path") and args.extension_path else None
 
         context = None
@@ -373,7 +630,14 @@ def run(filters: List[str]) -> None:
         if user_filters:
             filters = list(user_filters)
         else:
-            filters = ["Кубок ТТ", "Лига Про"] + (["Сетка Кап"] if want_setka else [])
+            # По умолчанию берём «Лига Про» (включая варианты: Минск, Чехия и т.п.) и «Кубок ТТ» (Польша, Чехия и т.д.)
+            filters = ["Лига Про", "Кубок ТТ"] + (["Сетка Кап"] if want_setka else [])
+        try:
+            # Обновим глобальный список допускаемых турниров (для доп. фильтра при сборе ссылок)
+            global _ALLOWED_TOURNAMENTS
+            _ALLOWED_TOURNAMENTS = [s for s in (filters or []) if isinstance(s, str) and s.strip()]
+        except Exception:
+            pass
 
         # Учитываем флаг all: отключаем фильтрацию турниров и сохраняем все матчи
         try:
@@ -443,25 +707,58 @@ def run(filters: List[str]) -> None:
                     except Exception:
                         pass
                 if token and chat_id:
-                    api_base = f"https://api.telegram.org/bot{token}/sendMessage"
-                    def _send(text: str):
+                    # Initialize Telegram API helpers
+                    global _TG_TOKEN, _TG_CHAT_ID
+                    _TG_TOKEN, _TG_CHAT_ID = token, str(chat_id)
+
+                    def _tg_send(text: str) -> Optional[int]:
                         try:
+                            api_base = f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage"
                             data = _urlparse.urlencode({
-                                'chat_id': chat_id,
+                                'chat_id': _TG_CHAT_ID,
                                 'text': text,
                                 'parse_mode': 'HTML',
                                 'disable_web_page_preview': 'true'
                             }).encode('utf-8')
                             req = _urlrequest.Request(api_base, data=data)
-                            _urlrequest.urlopen(req, timeout=10)
+                            with _urlrequest.urlopen(req, timeout=10) as resp:
+                                r = json.loads(resp.read().decode('utf-8'))
+                            if r.get('ok') and isinstance(r.get('result'), dict):
+                                return r['result'].get('message_id')
                         except Exception:
                             pass
+                        return None
+
+                    def _tg_edit(message_id: int, text: str) -> bool:
+                        try:
+                            api_base = f"https://api.telegram.org/bot{_TG_TOKEN}/editMessageText"
+                            data = _urlparse.urlencode({
+                                'chat_id': _TG_CHAT_ID,
+                                'message_id': str(message_id),
+                                'text': text,
+                                'parse_mode': 'HTML',
+                                'disable_web_page_preview': 'true'
+                            }).encode('utf-8')
+                            req = _urlrequest.Request(api_base, data=data)
+                            with _urlrequest.urlopen(req, timeout=10) as resp:
+                                r = json.loads(resp.read().decode('utf-8'))
+                            return bool(r.get('ok'))
+                        except Exception:
+                            return False
+
+                    # expose for later
+                    globals()['_tg_send'] = _tg_send
+                    globals()['_tg_edit'] = _tg_edit
+
+                    # Also keep simple sender for rare one-off uses
+                    def _send(text: str):
+                        _tg_send(text)
                     global _TG_SENDER
                     _TG_SENDER = _send
                     # Startup ping so user sees bot is alive
                     try:
                         ts = datetime.now().isoformat(timespec="seconds")
-                        _TG_SENDER(f"✅ Autobet started {ts}. Chat: {chat_id}")
+                        _tg_send(f"✅ Autobet started {ts}. Chat: {chat_id}")
                     except Exception as e:
                         try:
                             print(f"[tg] warn: cannot send startup ping: {e}")
@@ -500,6 +797,13 @@ def run(filters: List[str]) -> None:
             pass
 
         page.goto(URL, wait_until="domcontentloaded")
+        # Небольшая задержка для стабилизации отрисовки списка
+        try:
+            pre_collect_ms = int(getattr(args, 'pre_collect_ms', 400))
+            if pre_collect_ms > 0:
+                page.wait_for_timeout(pre_collect_ms)
+        except Exception:
+            pass
 
         # Try to dismiss common cookie popups quickly (best-effort, ignore failures)
         for text in ("Принять", "Согласен", "Accept", "I Agree"):
@@ -592,6 +896,15 @@ def run(filters: List[str]) -> None:
                 page.evaluate("console.info('AUTO:controls ready')")
             except Exception:
                 pass
+
+        # Учитываем флаги fresh/details
+        try:
+            globals()['_IGNORE_PROCESSED'] = bool(getattr(args, 'fresh', False) or (os.getenv('AUTOBET_FRESH') not in (None, '', '0', 'false', 'False')))
+            if globals()['_IGNORE_PROCESSED']:
+                print("[fresh] processed_* будет проигнорирован для этого запуска")
+            globals()['_SHOW_DETAILS'] = bool(getattr(args, 'details', False) or (os.getenv('AUTOBET_DETAILS') not in (None, '', '0', 'false', 'False')))
+        except Exception:
+            pass
 
         # Первый прогон
         try:
@@ -710,6 +1023,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
                         help="Сколько миллисекунд ждать отрисовку блока решения (по умолчанию 2000)")
+    parser.add_argument("--fresh", dest="fresh", action="store_true", help="Игнорировать processed_* и пересканировать все найденные ссылки заново")
+    parser.add_argument("--pre-collect-ms", dest="pre_collect_ms", type=int, default=400, help="Пауза перед сбором ссылок со страницы live, мс")
+    parser.add_argument("--post-open-ms", dest="post_open_ms", type=int, default=400, help="Пауза после открытия страницы статистики, мс")
+    parser.add_argument("--details", dest="details", action="store_true", help="Добавлять строку с пояснениями ℹ️ (по умолчанию выключено)")
     parser.add_argument("--prematch", dest="prematch", action="store_true",
                         help="Также парсить up-games (PREMATCH) и сохранять в prema_3of3.csv")
     # Telegram options
@@ -885,6 +1202,59 @@ def ensure_login(context, page, email: str, password: str) -> bool:
 # ---------------------- scanning/saving ----------------------
 
 def collect_filtered_stats_links(page) -> List[str]:
+    # First, if our extension panel is present, harvest scores from it
+    try:
+        panel = page.evaluate(
+            """
+            () => {
+              const box = document.getElementById('tsx-live-panel');
+              if (!box) return null;
+              const rows = Array.from(box.querySelectorAll('.row'));
+              const out = {};
+              for (const r of rows) {
+                const u = r.getAttribute('data-url');
+                if (!u) continue;
+                const sc = r.getAttribute('data-score') || '';
+                const st = r.getAttribute('data-sets') || '';
+                const fin = r.getAttribute('data-finished') === '1';
+                out[u] = { score: sc, sets: st.split('|').filter(Boolean), finished: !!fin };
+              }
+              return out;
+            }
+            """
+        )
+        if isinstance(panel, dict):
+            for u, d in panel.items():
+                try:
+                    key = _canonical_stats_url(u) if isinstance(u, str) else u
+                except Exception:
+                    key = u
+                try:
+                    sc = d.get('score') or None
+                except Exception:
+                    sc = None
+                if sc:
+                    _LIVE_SCORE_BY_URL[key] = sc
+                try:
+                    arr = d.get('sets') or []
+                    if isinstance(arr, list) and arr:
+                        _LIVE_SETS_BY_URL[key] = [str(x) for x in arr]
+                except Exception:
+                    pass
+                try:
+                    _LIVE_FINISHED_BY_URL[key] = bool(d.get('finished'))
+                except Exception:
+                    pass
+                # также сохраним левое/правое имя из параметров lp/rp для ориентации фаворита
+                try:
+                    q = parse_qs(urlparse(str(key)).query)
+                    lp = (q.get('lp') or [None])[0]
+                    rp = (q.get('rp') or [None])[0]
+                    _LIVE_LR_BY_URL[key] = (lp, rp)
+                except Exception:
+                    pass
+    except Exception:
+        pass
     base = "https://tennis-score.pro"
     # Собираем видимые ссылки на страницу статистики из отфильтрованных строк.
     # Доп. фильтр: стараемся исключать строки PREMATCH (up-games) по эвристикам текста строки.
@@ -906,6 +1276,15 @@ def collect_filtered_stats_links(page) -> List[str]:
             row_text_full = a.evaluate(
                 r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim(); }"
             ) or ""
+            # Дополнительный жёсткий фильтр по турнирам (если задан список)
+            try:
+                allowed = [s for s in (globals().get('_ALLOWED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
+            except Exception:
+                allowed = []
+            if allowed:
+                low = row_text_full.lower()
+                if not any(s.lower() in low for s in allowed):
+                    continue
             # Эвристика LIVE: присутствуют признаки счёта/процесса
             has_score = bool(re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", row_text))
             live_markers = ("лайв" in row_text) or ("live" in row_text) or ("идет" in row_text) or ("идёт" in row_text) or ("сет" in row_text)
@@ -923,6 +1302,85 @@ def collect_filtered_stats_links(page) -> List[str]:
                 continue
             seen.add(abs_url)
             hrefs.append(abs_url)
+            # Try to capture current live score from the same row for this URL
+            try:
+                score_info = a.evaluate(
+                    r"el => {\n"
+                    r"  const row = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el.parentElement;\n"
+                    r"  if (!row) return null;\n"
+                    r"  const td = row.querySelector('td.td-mob.mob-score, .td-mob.mob-score, .mob-score');\n"
+                    r"  const blocks = td ? Array.from(td.querySelectorAll('.score')).slice(0,2) : [];\n"
+                    r"  // read first .sum per block, ignore duplicates\n"
+                    r"  const readSum = (b)=>{ const d=b&&b.querySelector('.sum'); if(!d) return null; const t=(d.textContent||'').trim(); const n=parseInt(t,10); return Number.isFinite(n)? n : (t||null); };\n"
+                    r"  const sA = readSum(blocks[0]);\n"
+                    r"  const sB = readSum(blocks[1]);\n"
+                    r"  const finished = (sA!=null && sB!=null) && (Number(sA)===3 || Number(sB)===3);\n"
+                    r"  const score = (sA!=null && sB!=null) ? `${sA}:${sB}` : null;\n"
+                    r"  // collect per-set points for both players, pairwise\n"
+                    r"  const setsA = (blocks[0] ? Array.from(blocks[0].querySelectorAll('.set')).map(x => (x.textContent||'').trim()) : []);\n"
+                    r"  const setsB = (blocks[1] ? Array.from(blocks[1].querySelectorAll('.set')).map(x => (x.textContent||'').trim()) : []);\n"
+                    r"  const n = Math.min(setsA.length, setsB.length);\n"
+                    r"  const pairs = [];\n"
+                    r"  for (let i=0;i<n;i++){ pairs.push(`${setsA[i]}:${setsB[i]}`); }\n"
+                    r"  // Fallback: if no explicit score detected, try to parse 'X:Y' from row text (live list doesn't contain 'топ-счёт')\n"
+                    r"  if (!score) {\n"
+                    r"    const tx = (row.innerText||row.textContent||'').replace(/\s+/g,' ').trim();\n"
+                    r"    const m = tx.match(/\b([0-5])\s*[:\-–—]\s*([0-5])\b/);\n"
+                    r"    if (m) { score = `${m[1]}:${m[2]}`; }\n"
+                    r"  }\n"
+                    r"  // try read two visible name-like nodes from row\n"
+                    r"  const pickText = (el)=> (el ? (el.innerText||el.textContent||'').replace(/\s+/g,' ').trim() : '');\n"
+                    r"  const nameNodes = Array.from(row.querySelectorAll('.player, .name, .team, .competitor, .competitor-name, .name-player, .player-name'));\n"
+                    r"  const names = [];\n"
+                    r"  for (const n of nameNodes){ const t = pickText(n); if (t && t.length>=2 && !names.includes(t)) names.push(t); if (names.length>=2) break; }\n"
+                    r"  return { score, active:true, finished, pairs, names };\n"
+                    
+                    r"}"
+                )
+                if isinstance(score_info, dict):
+                    sc = score_info.get('score')
+                    if sc:
+                        _LIVE_SCORE_BY_URL[abs_url] = sc
+                        _LIVE_FINISHED_BY_URL[abs_url] = bool(score_info.get('finished'))
+                    try:
+                        pairs = score_info.get('pairs') or []
+                        def _trim_pairs(ps):
+                            arr = []
+                            for it in ps:
+                                try:
+                                    s = str(it)
+                                    a,b = s.split(':',1)
+                                    a=a.strip(); b=b.strip()
+                                    arr.append(f"{a}:{b}")
+                                except Exception:
+                                    continue
+                            # remove trailing 0:0 pairs
+                            while arr and re.match(r"^0\s*:\s*0$", arr[-1]):
+                                arr.pop()
+                            return arr
+                        if isinstance(pairs, list) and pairs:
+                            _LIVE_SETS_BY_URL[abs_url] = _trim_pairs(pairs)
+                        if os.getenv('AUTOBET_DEBUG'):
+                            try:
+                                sets_dbg = ", ".join(_LIVE_SETS_BY_URL.get(abs_url, []))
+                                print(f"[score] {abs_url} -> {sc or '—'}{(' ('+sets_dbg+')') if sets_dbg else ''}")
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                elif os.getenv('AUTOBET_DEBUG'):
+                    try:
+                        print(f"[score] {abs_url} -> no mob-score in row")
+                    except Exception:
+                        pass
+                    try:
+                        names = score_info.get('names') or []
+                        if isinstance(names, list) and names:
+                            _LIVE_NAMES_BY_URL[abs_url] = [str(x) for x in names if isinstance(x, str)][:2]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             # Try to attach league name for this URL using known leagues
             try:
                 if _KNOWN_LEAGUES and row_text_full:
@@ -1124,6 +1582,20 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
         try:
             page = context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Дождёмся сетевых запросов и дадим странице стабилизироваться
+            try:
+                page.wait_for_load_state('networkidle', timeout=5000)
+            except Exception:
+                pass
+            try:
+                post_open_ms = int(getattr(parse_args_for_runtime(), 'post_open_ms', 400))
+            except Exception:
+                post_open_ms = 400
+            try:
+                if post_open_ms > 0:
+                    page.wait_for_timeout(post_open_ms)
+            except Exception:
+                pass
             if stop_event is not None and stop_event.is_set():
                 try:
                     page.close()
@@ -1155,18 +1627,43 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 try:
                     if _TG_SENDER:
                         compare = _extract_compare_block(page)
-                        # Prefer H2H score from compare; fallback to current match score if needed
-                        h2h_score = None
+                        # Live score: prefer captured from live list by URL; fallback to stats page extraction
+                        live_score = None
                         try:
-                            if isinstance(compare, dict):
-                                h2h_score = compare.get('h2hScore')
+                            live_score = _LIVE_SCORE_BY_URL.get(_canonical_stats_url(url)) or _LIVE_SCORE_BY_URL.get(url)
+                        except Exception:
+                            live_score = None
+                        # do not fallback to stats page to avoid mixing with 'топ-счёт'
+                        # Try to resolve orientation of live score relative to favourite using live names or lp/rp
+                        try:
+                            if url in _LIVE_NAMES_BY_URL:
+                                names = _LIVE_NAMES_BY_URL.get(url) or []
+                                if len(names) >= 2:
+                                    def _n(s: str) -> str:
+                                        return re.sub(r"\s+", " ", (s or '').lower()).strip()
+                                    live_left = _n(names[0]); live_right = _n(names[1])
+                                    fav_n = _n(fav); opp_n = _n(opp)
+                                    # match by substring inclusion either way
+                                    if fav_n and (fav_n in live_left or live_left in fav_n):
+                                        _LIVE_FAV_IS_LEFT_BY_URL[_canonical_stats_url(url)] = True
+                                    elif fav_n and (fav_n in live_right or live_right in fav_n):
+                                        _LIVE_FAV_IS_LEFT_BY_URL[_canonical_stats_url(url)] = False
+                            # fallback: use lp/rp from the URL map (panel)
+                            if _LIVE_FAV_IS_LEFT_BY_URL.get(_canonical_stats_url(url)) is None:
+                                try:
+                                    lp, rp = _LIVE_LR_BY_URL.get(_canonical_stats_url(url), (None, None))
+                                except Exception:
+                                    lp, rp = (None, None)
+                                if isinstance(lp, str) or isinstance(rp, str):
+                                    fav_n = re.sub(r"\s+", " ", (fav or '').lower()).strip()
+                                    if isinstance(lp, str) and fav_n and re.sub(r"\s+", " ", lp.lower()).strip() == fav_n:
+                                        _LIVE_FAV_IS_LEFT_BY_URL[_canonical_stats_url(url)] = True
+                                    elif isinstance(rp, str) and fav_n and re.sub(r"\s+", " ", rp.lower()).strip() == fav_n:
+                                        _LIVE_FAV_IS_LEFT_BY_URL[_canonical_stats_url(url)] = False
                         except Exception:
                             pass
-                        if not h2h_score:
-                            try:
-                                h2h_score = _extract_current_score(page)
-                            except Exception:
-                                h2h_score = None
+                        # Detect finished state from live list (preferred)
+                        finished = bool(_LIVE_FINISHED_BY_URL.get(_canonical_stats_url(url)) or _LIVE_FINISHED_BY_URL.get(url))
                         # Определим полное название лиги для заголовка сообщения
                         league = None
                         try:
@@ -1179,10 +1676,12 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                                 league = _LEAGUE_BY_URL.get(url)
                             except Exception:
                                 pass
-                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, h2h_score, league=league)
+                        # Всегда отправляем сообщение; строка счёта появится, когда live-счёт станет доступен
+                            score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
+                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
                         # Optional filter: skip PASS verdicts
                         if not (HIDE_PASS and (' | 🔴 PASS |' in msg or msg.strip().endswith('🔴 PASS | Ставка: —'))):
-                            _TG_SENDER(msg)
+                            _upsert_tg_message(url, msg, finished)
                 except Exception:
                     pass
                 processed.add(url)  # помечаем как обработанный только при успешном сохранении
@@ -1429,19 +1928,33 @@ def _extract_current_score(page) -> Optional[str]:
     except Exception:
         pass
 
-    # 2) Fallback: scan body text
+    # 2) Fallback: scan body text (avoid 'Топ‑счёт' and predictions)
     try:
         body = page.locator('body').inner_text(timeout=1500)
     except Exception:
         body = ""
     if body:
         text = re.sub(r"\s+", " ", body)
-        # Avoid matching times like 00:49 by preferring small numbers or nearby keywords
-        m = re.search(r"(?:сч[её]т|сеты|sets|по\s*сетам)[^\d]{0,20}(\d{1,2})\s*[:\-–—]\s*(\d{1,2})", text, re.IGNORECASE)
+        # Avoid matching times like 00:49; avoid 'топ-счёт' and predictions
+        m = None
+        for pat in (
+            r"(?:по\s*сетам|сеты|sets)[^\d]{0,20}(\d{1,2})\s*[:\-–—]\s*(\d{1,2})",
+            r"\b([0-5])\s*[:\-–—]\s*([0-5])\b",
+        ):
+            mm = re.search(pat, text, re.IGNORECASE)
+            if mm:
+                # Make sure the substring is not part of 'топ-счёт'
+                span_text = text[max(0, mm.start()-12):mm.start()].lower()
+                if 'топ' in span_text or 'top' in span_text:
+                    continue
+                m = mm
+                break
         if not m:
-            m = re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", text)
-        if not m:
-            m = re.search(r"\b(\d{1,2})\s*[:\-–—]\s*(\d{1,2})\b", text)
+            mm = re.search(r"\b(\d{1,2})\s*[:\-–—]\s*(\d{1,2})\b", text)
+            if mm:
+                span_text = text[max(0, mm.start()-12):mm.start()].lower()
+                if 'топ' not in span_text and 'top' not in span_text:
+                    m = mm
         if m:
             return f"{m.group(1)}:{m.group(2)}"
     return None
@@ -1764,6 +2277,9 @@ def _format_tg_message_new(
     """Build a compact Telegram message. Uses compare-block data when present,
     otherwise falls back to a short 4-line summary."""
     ts = datetime.now().strftime('%H:%M')
+    # repurpose optional param as live score line
+    live_score = h2h_score if isinstance(h2h_score, str) and h2h_score.strip() else None
+
     if isinstance(compare, dict):
         # New layout: mirror key rows from .min2-compare for Telegram
         try:
@@ -1982,8 +2498,10 @@ def _format_tg_message_new(
                     fci_v = _to_num(cmp.get('fciPct'))
                     sum_ag = _to_num(cmp.get('committeePct'))
                     top = (cmp.get('mbt') or {}).get('bestScore')
-                    d35s = (cmp.get('d35') or {}).get('fav')
-                    dnum = _parse_delta_num(d35s)
+                    d35s_f = (cmp.get('d35') or {}).get('fav')
+                    d35s_o = (cmp.get('d35') or {}).get('opp')
+                    dnum_f = _parse_delta_num(d35s_f)
+                    dnum_o = _parse_delta_num(d35s_o)
 
                     def clamp01(x: float) -> float:
                         return max(0.0, min(1.0, x))
@@ -1993,34 +2511,87 @@ def _format_tg_message_new(
                     pNo = norm(p_no)
                     pLog = norm(p_log)
                     pStr = norm(p_str)
+                    pH2 = norm(p_h2h)
                     fciN = norm(fci_v)
                     sumN = norm(sum_ag) if sum_ag is not None else None
-                    trendV = dnum if (dnum is not None) else 0.0
+                    trendFav = dnum_f if (dnum_f is not None) else 0.0
+                    trendOpp = dnum_o if (dnum_o is not None) else 0.0
 
-                    # Base (percent scale) → normalize to 0..1
-                    # Compose base in percent space
-                    base_pct = (0.28*(pNo*100)) + (0.25*((p_str if p_str is not None else (pNo*100)))) + (0.22*(fciN*100)) + (0.15*((p_h2h or 0))) + (0.10*(pLog*100))
-                    score_pct = base_pct
-                    # Corrections in percent space
-                    if sumN is not None and sumN < 0.50:
-                        score_pct -= 5
-                    if trendV < -10:
-                        score_pct -= 5
-                    if abs((pNo*100) - (pLog*100)) > 20:
-                        score_pct -= 5
-                    if isinstance(top, str) and top in { '3:0','3:1','3:2' }:
-                        score_pct += 4
-                    else:
-                        score_pct -= 6
-                    score = clamp01((score_pct)/100.0)
+                    # Base in percent space from four pillars 👤, 👥, 📊, 💪
+                    # If some are missing, fall back to available ones with proportional weights
+                    comps = []
+                    weights = []
+                    if p_no is not None: comps.append(p_no); weights.append(0.30)
+                    if p_h2h is not None: comps.append(p_h2h); weights.append(0.20)
+                    if p_log is not None: comps.append(p_log); weights.append(0.25)
+                    if p_str is not None: comps.append(p_str); weights.append(0.25)
+                    if not comps:
+                        return ''
+                    wsum = sum(weights) or 1.0
+                    base_pct = sum(c*w for c, w in zip(comps, weights)) / wsum
+                    score = clamp01(base_pct/100.0)
+
+                    # --- Corrections per prompt ---
+                    # 1) Extreme SUM
+                    if sum_ag is not None and (sum_ag < 50 or sum_ag > 80):
+                        score -= 0.04
+                    # 2) Overheated favorite: high FCI, weak SUM
+                    if (fci_v is not None and fci_v > 70) and (sum_ag is not None and sum_ag < 60):
+                        score -= 0.06
+                    # 3) False 3:0 signals
+                    if isinstance(top, str) and top.strip() == '3:0' and score < 0.70:
+                        score -= 0.05
+                    # 4) Dissonance across pillars
+                    pillars = [x for x in (p_no, p_h2h, p_log, p_str) if isinstance(x, (int, float))]
+                    if pillars:
+                        if (max(pillars) - min(pillars)) > 15:
+                            score -= 0.04
+                    # 6) Soft boost for stable winners
+                    if (sum_ag is not None and 70 <= sum_ag <= 80) and (fci_v is not None and 55 <= fci_v <= 65) and (isinstance(top, str) and top in {'3:1','3:2'}):
+                        score += 0.03
+                    # 7) Consistency bonus (all four within ±5 pp)
+                    if len(pillars) >= 3 and (max(pillars) - min(pillars)) <= 5:
+                        score += 0.02
+
+                    # --- Last-5 pattern rules ---
+                    pattern_notes = []
+                    def last5_from_dots(dots: str) -> str:
+                        if not dots:
+                            return ''
+                        xs = [ch for ch in str(dots) if ch in ('🟢','🔴')]
+                        return ''.join(xs[-5:])
+                    fav_last5 = last5_from_dots(((cmp.get('last10') or {}).get('favDots') or ''))
+                    opp_last5 = last5_from_dots(((cmp.get('last10') or {}).get('oppDots') or ''))
+
+                    # 1) Green fall for favorite
+                    if fav_last5 in ("🟢🟢🟢🔴🔴", "🟢🟢🔴🔴🔴"):
+                        score -= 0.05
+                        pattern_notes.append("зеленый спад (оверрейт)")
+                    # 2) Long fall for favorite (four losses)
+                    if "🔴🔴🔴🔴" in fav_last5:
+                        score -= 0.06
+                        pattern_notes.append("длинный спад (низкая форма)")
+                    # 3) Underdog bounce
+                    if opp_last5 in ("🔴🔴🟢🟢🟢", "🔴🟢🟢🟢🟢"):
+                        score += 0.05
+                        pattern_notes.append("отскок андердога (апсет-тренд)")
+                    # 4) Chaos / alternating
+                    if fav_last5 in ("🟢🔴🟢🔴🟢", "🔴🟢🔴🟢🔴"):
+                        score -= 0.03
+                        pattern_notes.append("нестабильная форма")
+
+                    # Clamp to requested range 0.20–0.85
+                    score = max(0.20, min(0.85, score))
 
                     # Underdog activation rule (proxy signals)
                     und_no = _to_num(((cmp.get('nb3') or {}).get('opp') or {}).get('noH2H'))
                     und_log = _to_num((cmp.get('ml3') or {}).get('opp'))
+                    # Mirror condition per prompt: trend +10 for underdog and SUM > 70
+                    sum_ok = (sum_ag is not None and sum_ag > 70)
                     underdog_has_signal = (
                         (und_no is not None and und_no >= 60) or
                         (und_log is not None and und_log >= 55) or
-                        (trendV <= -10)
+                        (trendOpp is not None and trendOpp >= 10 and sum_ok)
                     )
 
                     # Decide badge and stake per prompt
@@ -2028,14 +2599,22 @@ def _format_tg_message_new(
                     flag = '—'
                     stake = '—'
                     out_score = score
-                    if score >= 0.70:
+                    # Пользователь не хочет выводить замечание «нестабильная форма»
+                    pattern_notes = [n for n in pattern_notes if n != 'нестабильная форма']
+                    pattern_note = "; ".join(pattern_notes) if pattern_notes else ''
+
+                    if score >= 0.72:
                         badge = '✅ GO'; flag = '🏆'; stake = fav_name
                     elif score >= 0.60:
                         badge = '🟢 MID'; flag = '🏆'; stake = fav_name
-                    elif score >= 0.53:
+                    elif 0.55 <= score < 0.60:
                         badge = '🟡 RISK'; flag = '🏆'; stake = fav_name
                     elif score < 0.45 and underdog_has_signal:
                         badge = '🟢 GO'; flag = '🚩'; stake = opp_name; out_score = score
+                        if pattern_note:
+                            pattern_note += "; апсет: недооценённый андердог"
+                        else:
+                            pattern_note = "апсет: недооценённый андердог"
                     else:
                         badge = '🔴 PASS'; flag = '—'; stake = '—'
 
@@ -2044,7 +2623,11 @@ def _format_tg_message_new(
                         stake_part = 'Ставка: —'
                     else:
                         stake_part = f"{flag} {esc(stake)}"
-                    return f"🎯 {out_score:.2f} | {badge} | {stake_part}"
+                    line = f"🎯 {out_score:.2f} | {badge} | {stake_part}"
+                    # По умолчанию детали выключены; включаются флагом --details
+                    if pattern_note and globals().get('_SHOW_DETAILS'):
+                        line = line + "\n" + f"ℹ️ {esc(pattern_note)}"
+                    return line
                 except Exception:
                     return ''
 
@@ -2102,6 +2685,7 @@ def _format_tg_message_new(
                 esc(fci_line) if fci_line else '',
                 f"<a href=\"{link}\">Статистика</a>",
                 final_line if final_line else '',
+                (f"📟 Счёт: {esc(live_score)}" if live_score else ''),
             ]
             return "\n".join([s for s in parts if s])
         except Exception:
@@ -2194,9 +2778,12 @@ def _format_tg_message_new(
         # H2H dots and H2H score before the stats link
         if h2h_f_s or h2h_o_s:
             parts.append(f"⚔️ {h2h_f_s} | {h2h_o_s}")
-        if h2h_score:
-            parts.append(f"📟 {esc(h2h_score)}")
         parts.append(f"<a href=\"{link}\">Статистика</a>")
+        # Score line strictly after verdict
+        if final_line:
+            parts.append(final_line)
+        if live_score:
+            parts.append(f"📟 Счёт: {esc(live_score)}")
         return "\n".join([p for p in parts if p])
 
     # Fallback to old format
@@ -2257,7 +2844,7 @@ def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Option
 
 def load_processed_urls(processed_path: str) -> Set[str]:
     # Режим "свежий запуск": игнорировать прошлые processed
-    if os.getenv("AUTOBET_FRESH"):
+    if os.getenv("AUTOBET_FRESH") or globals().get('_IGNORE_PROCESSED'):
         return set()
     try:
         with open(processed_path, "r", encoding="utf-8") as f:
@@ -2296,10 +2883,20 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         except Exception as e:
             print(f"[LIVE] Ошибка сбора матчей: {e}")
             links = []
+        # Быстро обновим live-счёты в уже отправленных сообщениях, не открывая страницы
+        try:
+            _refresh_live_scores(links)
+        except Exception:
+            pass
         try:
             scan_and_save_stats(context, links, OUTPUT_LIVE_CSV, PROCESSED_LIVE_JSON, stop_event)
         except Exception as e:
             print(f"[LIVE] Ошибка обработки матчей: {e}")
+        # После отправки сообщений сразу попробуем обновить счёт, чтобы не ждать следующий тик
+        try:
+            _refresh_live_scores(links)
+        except Exception:
+            pass
 
         # 2) PREMATCH (up-games) — временно отключено
         if PARSE_UPCOMING or os.getenv("AUTOBET_PREMATCH"):
@@ -2337,6 +2934,10 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 except Exception as e:
                     print(f"[PREM] Ошибка сбора матчей: {e}")
                     links2 = []
+                try:
+                    _refresh_live_scores(links2)
+                except Exception:
+                    pass
                 try:
                     scan_and_save_stats(context, links2, OUTPUT_PREMA_CSV, PROCESSED_PREMA_JSON, stop_event)
                 except Exception as e:
