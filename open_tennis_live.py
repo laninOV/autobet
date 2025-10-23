@@ -96,6 +96,7 @@ _LIVE_SETS_BY_URL: Dict[str, List[str]] = {}
 _LIVE_NAMES_BY_URL: Dict[str, List[str]] = {}
 _LIVE_FAV_IS_LEFT_BY_URL: Dict[str, bool] = {}
 _LIVE_LR_BY_URL: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+_STAKE_IS_FAV_BY_URL: Dict[str, Optional[bool]] = {}
 _SHOW_DETAILS = False
 
 # Telegram API helpers (send/edit)
@@ -245,10 +246,10 @@ def _compose_score_with_sets(url: str, base_score: Optional[str]) -> Optional[st
                 out.pop()
             return out
         sets = clean(_LIVE_SETS_BY_URL.get(url))
-        # Optional status marker for favorite
+        # Optional status marker for the STAKE side (not necessarily favorite)
         marker = None
         try:
-            # decide favorite set count orientation if known
+            # decide favorite set count orientation if known (for Fav:Opp orientation only)
             fav_left = _LIVE_FAV_IS_LEFT_BY_URL.get(url)
             if fav_left is not None:
                 try:
@@ -257,12 +258,16 @@ def _compose_score_with_sets(url: str, base_score: Optional[str]) -> Optional[st
                     fav_sets = sa if fav_left else sb
                     opp_sets = sb if fav_left else sa
                     finished = bool(_LIVE_FINISHED_BY_URL.get(url))
-                    if fav_sets >= 3:
+                    # Determine stake side (default = favorite)
+                    stake_is_fav = _STAKE_IS_FAV_BY_URL.get(url)
+                    if stake_is_fav is None:
+                        stake_is_fav = True
+                    stake_sets = fav_sets if stake_is_fav else opp_sets
+                    if stake_sets >= 3:
                         marker = '✅'
-                    elif fav_sets >= 2:
+                    elif stake_sets >= 2:
                         marker = '🟡'
                     else:
-                        # if завершён и фаворит <2 — точно ❌, иначе пока нет 2 — ❌ (живое)
                         marker = '❌'
                     # Re-orient entire score and sets to Fav:Opp if fav is on the right
                     if fav_left is False:
@@ -2623,6 +2628,12 @@ def _format_tg_message_new(
                         stake_part = 'Ставка: —'
                     else:
                         stake_part = f"{flag} {esc(stake)}"
+                    # Persist stake side for this URL so that score marker (✅/🟡/❌) is relative to the stake, not always to favorite
+                    try:
+                        canon_url = _canonical_stats_url(url)
+                        _STAKE_IS_FAV_BY_URL[canon_url] = (stake == fav_name)
+                    except Exception:
+                        pass
                     line = f"🎯 {out_score:.2f} | {badge} | {stake_part}"
                     # По умолчанию детали выключены; включаются флагом --details
                     if pattern_note and globals().get('_SHOW_DETAILS'):
@@ -2779,11 +2790,16 @@ def _format_tg_message_new(
         if h2h_f_s or h2h_o_s:
             parts.append(f"⚔️ {h2h_f_s} | {h2h_o_s}")
         parts.append(f"<a href=\"{link}\">Статистика</a>")
-        # Score line strictly after verdict
+        # Score line strictly after verdict; recompute to ensure stake‑relative marker (✅/🟡/❌)
         if final_line:
             parts.append(final_line)
         if live_score:
-            parts.append(f"📟 Счёт: {esc(live_score)}")
+            try:
+                canon_url = _canonical_stats_url(url)
+                sline = _compose_score_with_sets(canon_url, live_score)
+                parts.append(f"📟 Счёт: {esc(sline)}")
+            except Exception:
+                parts.append(f"📟 Счёт: {esc(live_score)}")
         return "\n".join([p for p in parts if p])
 
     # Fallback to old format
