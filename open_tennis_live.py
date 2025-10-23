@@ -876,7 +876,23 @@ def run(filters: List[str]) -> None:
                     input()
                 except Exception:
                     pass
-                stop_event.set()
+                try:
+                    print("[exit] Пользователь нажал Enter — завершаю…")
+                except Exception:
+                    pass
+                try:
+                    stop_event.set()
+                except Exception:
+                    pass
+                # Попробуем корректно закрыть контекст/браузер и завершить процесс
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    os._exit(0)
+                except Exception:
+                    sys.exit(0)
 
             try:
                 t = threading.Thread(target=_wait_for_enter, daemon=True)
