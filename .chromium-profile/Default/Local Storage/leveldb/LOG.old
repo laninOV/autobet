@@ -1,5 +1,15 @@
-2025/10/23-22:25:14.895 c8475 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/MANIFEST-000001
-2025/10/23-22:25:14.897 c8475 Recovering log #251
-2025/10/23-22:25:14.897 c8475 Level-0 table #254: started
-2025/10/23-22:25:14.901 c8475 Level-0 table #254: 13213 bytes OK
-2025/10/23-22:25:14.903 c8475 Delete type=0 #251
+2025/10/23-22:26:40.763 c8dce Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2025/10/23-22:26:40.765 c8dce Recovering log #255
+2025/10/23-22:26:40.765 c8dce Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/Local Storage/leveldb/000255.log 
+2025/10/23-22:28:41.912 c8dd2 Level-0 table #258: started
+2025/10/23-22:28:41.915 c8dd2 Level-0 table #258: 13063 bytes OK
+2025/10/23-22:28:41.918 c8dd2 Delete type=0 #255
+2025/10/23-22:28:41.919 c8dd2 Compacting 4@0 + 1@1 files
+2025/10/23-22:28:41.921 c8dd2 Generated table #259@0: 3757 keys, 82704 bytes
+2025/10/23-22:28:41.921 c8dd2 Compacted 4@0 + 1@1 files => 82704 bytes
+2025/10/23-22:28:41.921 c8dd2 compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/10/23-22:28:41.922 c8dd2 Delete type=2 #258
+2025/10/23-22:28:41.922 c8dd2 Delete type=2 #254
+2025/10/23-22:28:41.922 c8dd2 Delete type=2 #247
+2025/10/23-22:28:41.922 c8dd2 Delete type=2 #252
+2025/10/23-22:28:41.922 c8dd2 Delete type=2 #250

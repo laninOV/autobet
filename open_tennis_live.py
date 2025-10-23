@@ -100,6 +100,8 @@ _LIVE_FAV_IS_LEFT_BY_URL: Dict[str, bool] = {}
 _LIVE_LR_BY_URL: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 _STAKE_IS_FAV_BY_URL: Dict[str, Optional[bool]] = {}
 _SHOW_DETAILS = False
+_GLOBAL_EXT_PATH: Optional[str] = None
+_CONTENT_JS_CACHE: Optional[str] = None
 
 # Telegram API helpers (send/edit)
 _TG_TOKEN: Optional[str] = None
@@ -137,6 +139,47 @@ def _save_tg_map():
             json.dump(out, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+def _load_content_js_from_ext(ext_path: Optional[str]) -> Optional[str]:
+    """Load content script JS from the extension folder.
+    Returns JS string or None if not available."""
+    try:
+        base = ext_path or DEFAULT_EXTENSION_PATH or _REPO_EXT
+        if not base:
+            return None
+        path = os.path.join(os.path.expanduser(base), "content", "index.js")
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _ensure_content_script(context, page, ext_path: Optional[str]) -> bool:
+    """Best‑effort injection of the content script when Chromium didn't attach it.
+    Adds init_script on context and injects into the current page. Returns True if injected."""
+    try:
+        global _CONTENT_JS_CACHE
+        if not _CONTENT_JS_CACHE:
+            _CONTENT_JS_CACHE = _load_content_js_from_ext(ext_path)
+        js = _CONTENT_JS_CACHE
+        if not js:
+            return False
+        try:
+            context.add_init_script(js)
+        except Exception:
+            pass
+        try:
+            page.add_script_tag(content=js)
+        except Exception:
+            pass
+        try:
+            print("[ext] принудительная инъекция content/index.js выполнена")
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
 
 def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
     """Send or edit a Telegram message per match URL.
@@ -808,6 +851,7 @@ def run(filters: List[str]) -> None:
             )
             try:
                 globals()['_GLOBAL_CONTEXT'] = context
+                globals()['_GLOBAL_EXT_PATH'] = ext_path
             except Exception:
                 pass
             page = context.new_page() if len(context.pages) == 0 else context.pages[0]
@@ -846,7 +890,16 @@ def run(filters: List[str]) -> None:
         try:
             loaded = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
             if not loaded:
-                print("[ext] предупреждение: контент‑скрипт не виден на live_v2 (будет использован fallback)")
+                print("[ext] предупреждение: контент‑скрипт не виден на live_v2 — пробую инъекцию JS…")
+                _ensure_content_script(context, page, globals().get('_GLOBAL_EXT_PATH'))
+                try:
+                    loaded2 = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+                    if loaded2:
+                        print("[ext] content‑script активирован принудительно")
+                    else:
+                        print("[ext] предупреждение: инъекция не удалась, будет использован fallback")
+                except Exception:
+                    print("[ext] предупреждение: не удалось проверить состояние скрипта после инъекции")
         except Exception:
             pass
 
@@ -1642,6 +1695,13 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             continue
         try:
             page = context.new_page()
+            # На всякий случай инъектим контент‑скрипт до загрузки /stats, если не активен
+            try:
+                ok = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+            except Exception:
+                ok = False
+            if not ok:
+                _ensure_content_script(context, page, globals().get('_GLOBAL_EXT_PATH'))
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
             # Дождёмся сетевых запросов и дадим странице стабилизироваться
             try:
