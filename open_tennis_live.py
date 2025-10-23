@@ -780,21 +780,52 @@ def run(filters: List[str]) -> None:
             # Use persistent context to load extension
             user_data_dir = os.path.join(os.path.dirname(__file__), ".chromium-profile")
             os.makedirs(user_data_dir, exist_ok=True)
+            # Extensions не поддерживаются в headless-режиме — принудительно выключим headless,
+            # чтобы расширение гарантированно подхватилось (особенно при запуске от root)
+            try:
+                if getattr(args, 'headless', False):
+                    print("[ext] headless отключён, чтобы загрузить расширение")
+            except Exception:
+                pass
+            headless_for_ext = False
+            # Дополнительные флаги для Chromium под root/на серверах
+            extra_args = []
+            try:
+                if hasattr(os, 'geteuid') and os.geteuid() == 0:
+                    extra_args += ["--no-sandbox", "--disable-setuid-sandbox"]
+            except Exception:
+                pass
+            # Уменьшаем вероятность падений из‑за /dev/shm
+            extra_args += ["--disable-dev-shm-usage"]
+            args_list = [
+                f"--disable-extensions-except={ext_path}",
+                f"--load-extension={ext_path}",
+            ] + extra_args
             context = p.chromium.launch_persistent_context(
                 user_data_dir,
-                headless=bool(getattr(args, 'headless', False)),
-                args=[
-                    f"--disable-extensions-except={ext_path}",
-                    f"--load-extension={ext_path}",
-                ],
+                headless=headless_for_ext,
+                args=args_list,
             )
+            try:
+                globals()['_GLOBAL_CONTEXT'] = context
+            except Exception:
+                pass
             page = context.new_page() if len(context.pages) == 0 else context.pages[0]
+            try:
+                print(f"[ext] загружено из: {ext_path}")
+            except Exception:
+                pass
         else:
             # Regular non-persistent context (no extension)
             browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)))
             storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
             context = browser.new_context(storage_state=storage)
             page = context.new_page()
+            try:
+                globals()['_GLOBAL_CONTEXT'] = context
+                globals()['_GLOBAL_BROWSER'] = browser
+            except Exception:
+                pass
 
         # Применим таймаут ожидания решения из аргументов
         try:
@@ -809,6 +840,13 @@ def run(filters: List[str]) -> None:
             pre_collect_ms = int(getattr(args, 'pre_collect_ms', 400))
             if pre_collect_ms > 0:
                 page.wait_for_timeout(pre_collect_ms)
+        except Exception:
+            pass
+        # Диагностика: проверим, подхватился ли контент‑скрипт расширения на live_v2
+        try:
+            loaded = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+            if not loaded:
+                print("[ext] предупреждение: контент‑скрипт не виден на live_v2 (будет использован fallback)")
         except Exception:
             pass
 
