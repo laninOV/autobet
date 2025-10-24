@@ -1698,11 +1698,33 @@ def collect_filtered_stats_links(page) -> List[str]:
     anchors = page.locator("a[href*='/stats/?']")
     count = anchors.count()
     _dbg('collect', f'anchors total={count}')
+    # quick visibility estimate from page-world
+    try:
+        vis_cnt = page.evaluate(
+            '() => Array.from(document.querySelectorAll("a[href*=\\"/stats/?\\\"]")).filter(a => {\n'
+            '  try {\n'
+            '    const rects=a.getClientRects();\n'
+            '    const cs=getComputedStyle(a);\n'
+            '    const hidden = !!a.closest(".__auto-filter-hidden__") || a.hasAttribute("hidden") || a.getAttribute("aria-hidden")==="true";\n'
+            '    return !hidden && rects.length>0 && cs.visibility!=="hidden" && cs.display!=="none";\n'
+            '  } catch { return false; }\n'
+            '}).length'
+        )
+        _dbg('collect', f'visible anchors quick={vis_cnt}')
+    except Exception:
+        pass
     for i in range(count):
         a = anchors.nth(i)
         try:
             # пропустим элементы внутри скрытых строк фильтра
-            hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
+            hidden = a.evaluate(
+                "el => { try {\n"
+                "  const rects=el.getClientRects();\n"
+                "  const cs=getComputedStyle(el);\n"
+                "  const h = !!el.closest('.__auto-filter-hidden__') || el.hasAttribute('hidden') || el.getAttribute('aria-hidden')==='true' || rects.length===0 || cs.visibility==='hidden' || cs.display==='none';\n"
+                "  return !!h;\n"
+                "} catch { return true; } }"
+            )
             if hidden:
                 _dbg('collect', f'skip hidden #{i}')
                 continue
