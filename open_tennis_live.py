@@ -105,6 +105,7 @@ _CONTENT_JS_CACHE: Optional[str] = None
 DRIVE_UI = False
 SAFE_MODE = True  # по умолчанию бережный режим: без тяжёлых фильтров на странице
 _PAUSED = False  # Пауза фонового сканирования/навигации
+_LAST_LIVE_LINKS: List[str] = []  # последние собранные ссылки со страницы live
 
 # Telegram API helpers (send/edit)
 _TG_TOKEN: Optional[str] = None
@@ -1199,6 +1200,7 @@ def run(filters: List[str]) -> None:
         print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
         deadline = time.monotonic() + bg_minutes * 60
         try:
+            last_score_refresh = time.monotonic()
             while time.monotonic() < deadline and not stop_event.is_set():
                 if globals().get('_PAUSED', False):
                     print("[pause] Тик пропущен — режим Пауза")
@@ -1244,6 +1246,24 @@ def run(filters: List[str]) -> None:
                     step = 0.1 if interval_sec >= 0.1 else interval_sec
                     time.sleep(step)
                     slept += step
+                    # Лёгкое обновление счёта каждые ~30 секунд без полного скана
+                    try:
+                        now = time.monotonic()
+                        if now - last_score_refresh >= 30:
+                            try:
+                                # Обновим текущие счёты из live списка, не открывая /stats
+                                links_soft = []
+                                try:
+                                    links_soft = collect_filtered_stats_links(page)
+                                except Exception:
+                                    links_soft = globals().get('_LAST_LIVE_LINKS') or []
+                                if links_soft:
+                                    _refresh_live_scores(links_soft)
+                                last_score_refresh = now
+                            except Exception:
+                                last_score_refresh = now
+                    except Exception:
+                        pass
         except KeyboardInterrupt:
             pass
         print("[bg] Завершение фонового сканирования")
@@ -3229,6 +3249,10 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         try:
             links = collect_filtered_stats_links(page)
             print(f"[LIVE] Найдено страниц статистики после фильтра: {len(links)}")
+            try:
+                globals()['_LAST_LIVE_LINKS'] = list(links)
+            except Exception:
+                pass
         except Exception as e:
             print(f"[LIVE] Ошибка сбора матчей: {e}")
             links = []
