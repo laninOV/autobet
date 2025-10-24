@@ -356,9 +356,49 @@ def _compose_score_with_sets(url: str, base_score: Optional[str]) -> Optional[st
                     pass
         except Exception:
             pass
+        # If we have per-set pairs, derive a safer total score from them
+        try:
+            def _derive_score(pairs: List[str]) -> Optional[str]:
+                try:
+                    a_w = 0; b_w = 0
+                    for it in pairs:
+                        a,b = str(it).split(':',1)
+                        aa = int(re.sub(r"\D","", a) or 0)
+                        bb = int(re.sub(r"\D","", b) or 0)
+                        if aa>bb: a_w+=1
+                        elif bb>aa: b_w+=1
+                    if a_w==0 and b_w==0:
+                        return None
+                    return f"{a_w}:{b_w}"
+                except Exception:
+                    return None
+            derived = _derive_score(sets)
+            if derived and derived != s:
+                s = derived
+                # If one side reached 3 by derived score — mark as finished
+                try:
+                    aa,bb = s.split(':',1)
+                    if int(aa)==3 or int(bb)==3:
+                        _LIVE_FINISHED_BY_URL[url] = True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         core = s
         if sets:
             core = f"{s} (" + ", ".join(sets) + ")"
+        # Re-evaluate stake marker if we updated s above and we know stake side
+        try:
+            aa,bb = s.split(':',1)
+            aa=int(str(aa).strip()); bb=int(str(bb).strip())
+            stake_is_fav = _STAKE_IS_FAV_BY_URL.get(url)
+            if stake_is_fav is None:
+                stake_is_fav = True
+            stake_sets = aa if stake_is_fav else bb
+            marker = '✅' if stake_sets>=3 else ('🟡' if stake_sets>=2 else '❌')
+        except Exception:
+            pass
         if marker:
             core = f"{core} {marker}"
         return core
@@ -1752,7 +1792,11 @@ def collect_filtered_stats_links(page) -> List[str]:
                     try:
                         if _KNOWN_LEAGUES and row_text_full:
                             for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
-                                if isinstance(name, str) and name and name in row_text_full:
+                                if not isinstance(name, str) or not name:
+                                    continue
+                                if name in ALWAYS_EXCLUDED:
+                                    continue
+                                if name in row_text_full:
                                     _LEAGUE_BY_URL[abs_url] = name
                                     break
                     except Exception:
@@ -2816,7 +2860,9 @@ def _extract_league_name(page) -> Optional[str]:
             """,
         )
         if isinstance(league_dom, str) and 2 <= len(league_dom) <= 120:
-            return league_dom
+            # Никогда не возвращаем запрещённые лиги
+            if not any(x for x in ALWAYS_EXCLUDED if x and x in league_dom):
+                return league_dom
     except Exception:
         pass
 
@@ -2828,7 +2874,7 @@ def _extract_league_name(page) -> Optional[str]:
             if hay:
                 # Ищем точные вхождения, длинные названия — приоритетнее
                 for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
-                    if name and name in hay:
+                    if name and (name not in ALWAYS_EXCLUDED) and name in hay:
                         return name
     except Exception:
         pass
@@ -2853,7 +2899,7 @@ def _extract_league_name(page) -> Optional[str]:
             if 2 <= len(val) <= 120:
                 return val
 
-    prefixes = ["Лига Про", "Кубок ТТ", "Сетка Кап", "TT Cup", "Win Cup", "Liga Pro"]
+    prefixes = ["Лига Про", "Кубок ТТ", "TT Cup", "Win Cup", "Liga Pro"]
     # расширим известными полными названиями, если есть
     try:
         for x in _KNOWN_LEAGUES:
@@ -2864,6 +2910,8 @@ def _extract_league_name(page) -> Optional[str]:
     best = None
     best_len = 0
     for pfx in prefixes:
+        if pfx in ALWAYS_EXCLUDED:
+            continue
         m = re.search(rf"\b{re.escape(pfx)}[^\n\r]*", text, flags=re.IGNORECASE)
         if m:
             cand = m.group(0).strip()
@@ -2888,6 +2936,12 @@ def _format_tg_message_new(
     """Build a compact Telegram message. Uses compare-block data when present,
     otherwise falls back to a short 4-line summary."""
     ts = datetime.now().strftime('%H:%M')
+    # Never display permanently excluded leagues in headers
+    try:
+        if league and any((x in league) for x in ALWAYS_EXCLUDED):
+            league = None
+    except Exception:
+        pass
     # repurpose optional param as live score line
     live_score = h2h_score if isinstance(h2h_score, str) and h2h_score.strip() else None
 
