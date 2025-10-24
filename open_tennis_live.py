@@ -1011,6 +1011,21 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
+        # Сразу применим визуальную фильтрацию по лигам на live-странице
+        try:
+            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+            try:
+                excl = getattr(args, 'exclude', None)
+            except Exception:
+                excl = None
+            if not excl:
+                ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                if ex_env:
+                    excl = [s.strip() for s in ex_env.split(',') if s.strip()]
+            excluded_js = json.dumps(excl or [], ensure_ascii=False)
+            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+        except Exception:
+            pass
         # Диагностика CS: проверяем маркер загрузки контент‑скрипта
         try:
             loaded = page.evaluate(
@@ -3235,6 +3250,23 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         print("[restart] Уже идёт сканирование — пропускаю запрос")
         return
     try:
+        # Обновим визуальный фильтр на live-странице (чтобы UI сразу показывал только нужные лиги)
+        try:
+            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+            # reuse excluded from main args/env
+            try:
+                args = parse_args_for_runtime()
+                excluded = getattr(args, 'exclude', None)
+            except Exception:
+                excluded = None
+            if not excluded:
+                ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                if ex_env:
+                    excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
+            excluded_js = json.dumps(excluded or [], ensure_ascii=False)
+            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+        except Exception:
+            pass
         # Не очищаем результаты при повторных пересканах.
         # Файлы перезатираются ТОЛЬКО при запуске программы (см. run()).
 
