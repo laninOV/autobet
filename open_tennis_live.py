@@ -1623,10 +1623,51 @@ def collect_filtered_stats_links(page) -> List[str]:
     except Exception:
         pass
     base = "https://tennis-score.pro"
-    # Собираем видимые ссылки на страницу статистики из отфильтрованных строк.
-    # Доп. фильтр: стараемся исключать строки PREMATCH (up-games) по эвристикам текста строки.
+    # Собираем видимые ссылки на страницу статистики из всех фреймов (не заходя в Playwright frame API)
     hrefs = []
     seen = set()
+    try:
+        urls_from_frames = page.evaluate(
+            r"""
+            () => {
+              const out = [];
+              const collect = (doc) => {
+                try {
+                  const as = Array.from(doc.querySelectorAll('a[href*="/stats/?"]'));
+                  for (const a of as) {
+                    try {
+                      if (a.closest('.__auto-filter-hidden__')) continue;
+                      const href = a.getAttribute('href') || '';
+                      if (!href || href.startsWith('#')) continue;
+                      out.push(href);
+                    } catch {}
+                  }
+                } catch {}
+              };
+              collect(document);
+              const ifrs = Array.from(document.querySelectorAll('iframe'));
+              for (const f of ifrs) {
+                try { if (f.contentDocument) collect(f.contentDocument); } catch {}
+              }
+              return out;
+            }
+            """
+        ) or []
+        if isinstance(urls_from_frames, list) and urls_from_frames:
+            for href in urls_from_frames:
+                try:
+                    if not isinstance(href, str):
+                        continue;
+                    abs_url = urljoin(base, href)
+                    if abs_url in seen:
+                        continue
+                    seen.add(abs_url)
+                    hrefs.append(abs_url)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    # Далее — уточнение по основному фрейму, плюс попытка собрать счёт из строки
     anchors = page.locator("a[href*='/stats/?']")
     count = anchors.count()
     for i in range(count):
@@ -1804,6 +1845,22 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
             last_height = height
             page.evaluate("h => window.scrollTo(0, h)", height)
             page.wait_for_timeout(pause_ms)
+    except Exception:
+        pass
+
+def expand_live_list_all_frames(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
+    try:
+        expand_live_list(page, max_scrolls=max_scrolls, pause_ms=pause_ms)
+    except Exception:
+        pass
+    try:
+        for fr in page.frames:
+            try:
+                if fr == page.main_frame:
+                    continue
+                expand_live_list(fr, max_scrolls=max_scrolls, pause_ms=pause_ms)
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -3329,18 +3386,27 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
 
         # 1) LIVE: текущая страница
         page.wait_for_timeout(800)
-        # Убедимся, что на странице появились ссылки на статистику
+        # Убедимся, что на странице (или во фреймах) появились ссылки на статистику
         try:
-            page.wait_for_selector("a[href*='/stats/?']", timeout=10000)
-        except Exception:
-            try:
+            import time as _t
+            start = _t.monotonic()
+            ok = False
+            while _t.monotonic() - start < 10:
+                try:
+                    if _count_visible_stats_links_all_frames(page) > 0:
+                        ok = True
+                        break
+                except Exception:
+                    pass
+                page.wait_for_timeout(300)
+            if not ok:
                 print("[live] warn: не вижу ссылок '/stats/?' — продолжаю с текущим DOM")
-            except Exception:
-                pass
+        except Exception:
+            pass
         try:
             # Обновим список лиг с live_v2 прежде чем собирать ссылки
             _update_known_leagues_from_page(page)
-            expand_live_list(page)
+            expand_live_list_all_frames(page)
         except Exception:
             pass
         try:
