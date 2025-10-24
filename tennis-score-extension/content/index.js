@@ -1026,8 +1026,16 @@ function renderFavOppCompare(payload) {
   };
 
   const install = () => {
+    const host = (location.hostname||'').toLowerCase();
+    const path = location.pathname||'';
+    const isLive = /tennis-score\.pro$/.test(host) && /\/live_v2\/?$/i.test(path);
     ensureButton();
     try { runLivePanel(); } catch {}
+    if (isLive) {
+      // На live-странице не подключаем тяжёлые наблюдатели и анализаторы
+      try { window.__tennisScoreExtract = null; } catch(_){ }
+      return;
+    }
     // If a previous version injected summaries, remove them to restore original page
     try {
       const ex = document.getElementById('tsx-auto-summaries');
@@ -1091,7 +1099,12 @@ function renderFavOppCompare(payload) {
   } else {
     install();
   }
-  mo.observe(document.documentElement, { childList: true, subtree: true });
+  try {
+    const host = (location.hostname||'').toLowerCase();
+    const path = location.pathname||'';
+    const isLive = /tennis-score\.pro$/.test(host) && /\/live_v2\/?$/i.test(path);
+    if (!isLive) mo.observe(document.documentElement, { childList: true, subtree: true });
+  } catch(_) { mo.observe(document.documentElement, { childList: true, subtree: true }); }
 
   // Update existing on-page take-two-sets/min2-extract blocks to reflect recalculated values
   function updateAllMin2Extracts() {
@@ -3695,11 +3708,14 @@ function computeStabilityFromPatterns(p) {
       }
     });
   }
-  try { injectOnce(document); } catch(_){ }
   try {
+    const host = (location.hostname||'').toLowerCase();
+    const path = location.pathname||'';
+    const isStats = (/tennis-score\.pro$/.test(host) && /\/mstat\//i.test(path)) || document.querySelector('.container-xl.mb-5');
+    if (!isStats) return; // only on stats pages
+    injectOnce(document);
     const mo = new MutationObserver(()=>{ try{ injectOnce(document); }catch(_){ } });
     mo.observe(document.documentElement, { subtree:true, childList:true });
-    // Reduce background polling; mutations usually suffice
     if (!window.__TSX_SERVER_MODE__) {
       setInterval(()=>{ try{ injectOnce(document); }catch(_){ } }, 5000);
     }

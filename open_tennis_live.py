@@ -486,6 +486,8 @@ CONTROL_JS = r"""
 
 FILTER_JS = r"""
 (() => {
+  if (window.__AUTO_FILTER_ACTIVE__) return true; // idempotent guard
+  window.__AUTO_FILTER_ACTIVE__ = true;
   const ALLOWED = new Set(%(allowed)s);
   const EXCLUDED = new Set(%(excluded)s);
 
@@ -580,7 +582,9 @@ FILTER_JS = r"""
   observer.observe(document.documentElement, { subtree: true, childList: true });
 
   // Re-apply periodically to combat virtualized/React rerenders
-  setInterval(debounced, 2000);
+  if (!window.__AUTO_FILTER_INTERVAL__) {
+    window.__AUTO_FILTER_INTERVAL__ = setInterval(debounced, 2000);
+  }
 
   return true;
 })()
@@ -589,6 +593,8 @@ FILTER_JS = r"""
 # Лёгкий фильтр: без MutationObserver, только периодический проход (меньше нагрузка на Chromium)
 FILTER_JS_LIGHT = r"""
 (() => {
+  if (window.__AUTO_FILTER_ACTIVE_LIGHT__) return true;
+  window.__AUTO_FILTER_ACTIVE_LIGHT__ = true;
   const ALLOWED = new Set(%(allowed)s);
   const EXCLUDED = new Set(%(excluded)s);
   const styleId = '__auto_filter_style__';
@@ -621,7 +627,7 @@ FILTER_JS_LIGHT = r"""
     }
     ensureBadge();
   }
-  apply(); setInterval(apply, 3000); return true;
+  apply(); if (!window.__AUTO_FILTER_INTERVAL_LIGHT__) { window.__AUTO_FILTER_INTERVAL_LIGHT__ = setInterval(apply, 3000); } return true;
 })()
 """
 
@@ -1029,6 +1035,19 @@ def run(filters: List[str]) -> None:
                         context.add_init_script("try{ localStorage.setItem('__TSX_PERF','server'); window.__TSX_SERVER_MODE__=true; }catch(_){ }")
                     except Exception:
                         pass
+                # Block heavy resource types to reduce RAM/CPU
+                try:
+                    def _route_handler(route, request):
+                        try:
+                            rt = request.resource_type
+                            if rt in ("image", "media", "font"):
+                                return route.abort()
+                        except Exception:
+                            pass
+                        return route.continue_()
+                    context.route("**/*", _route_handler)
+                except Exception:
+                    pass
             except Exception:
                 pass
             if context is not None:
@@ -1057,6 +1076,19 @@ def run(filters: List[str]) -> None:
                         context.add_init_script("try{ localStorage.setItem('__TSX_PERF','server'); window.__TSX_SERVER_MODE__=true; }catch(_){ }")
                     except Exception:
                         pass
+                # Block heavy resource types to reduce RAM/CPU
+                try:
+                    def _route_handler(route, request):
+                        try:
+                            rt = request.resource_type
+                            if rt in ("image", "media", "font"):
+                                return route.abort()
+                        except Exception:
+                            pass
+                        return route.continue_()
+                    context.route("**/*", _route_handler)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1281,8 +1313,9 @@ def run(filters: List[str]) -> None:
         try:
             bg_minutes = getattr(args, 'bg_minutes', None)
             interval_sec = getattr(args, 'bg_interval', None)
+            score_interval_sec = getattr(args, 'score_interval', 20)
         except Exception:
-            bg_minutes, interval_sec = None, None
+            bg_minutes, interval_sec, score_interval_sec = None, None, 20
 
         if bg_minutes is None:
             bg_minutes = 30
@@ -1296,7 +1329,14 @@ def run(filters: List[str]) -> None:
         except Exception:
             interval_sec = 10
 
-        print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек")
+        # Минимум на счёт: 10 сек, чтобы не душить страницу
+        try:
+            if float(score_interval_sec) < 10:
+                score_interval_sec = 10
+        except Exception:
+            score_interval_sec = 20
+
+        print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек; обновление счёта каждые {score_interval_sec} сек")
         deadline = time.monotonic() + bg_minutes * 60
         try:
             last_score_refresh = time.monotonic()
@@ -1345,10 +1385,10 @@ def run(filters: List[str]) -> None:
                     step = 0.1 if interval_sec >= 0.1 else interval_sec
                     time.sleep(step)
                     slept += step
-                    # Лёгкое обновление счёта каждые ~30 секунд без полного скана
+                    # Лёгкое обновление счёта каждые score_interval_sec секунд без полного скана
                     try:
                         now = time.monotonic()
-                        if now - last_score_refresh >= 30:
+                        if now - last_score_refresh >= float(score_interval_sec):
                             try:
                                 # Обновим текущие счёты из live списка, не открывая /stats
                                 links_soft = []
@@ -1413,6 +1453,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
     parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
+    parser.add_argument("--score-interval", dest="score_interval", type=int, default=20,
+                        help="Как часто обновлять счёт между сканами, сек (по умолчанию 20)")
     parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
                         help="Разрешить мгновенный выход по Enter в терминале (по умолчанию выключено)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
@@ -1666,7 +1708,10 @@ def collect_filtered_stats_links(page) -> List[str]:
                       if (a.closest('.__auto-filter-hidden__')) continue;
                       const href = a.getAttribute('href') || '';
                       if (!href || href.startsWith('#')) continue;
-                      out.push(href);
+                      // try to read row text (league/tournament name lives in the same row)
+                      const row = a.closest('tr') || a.closest('[role="row"]') || a.closest('.row') || a.closest('li') || a.closest('.match') || a.parentElement;
+                      const rowText = row ? (row.innerText||row.textContent||'').replace(/\s+/g,' ').trim() : '';
+                      out.push({ href, rowText });
                     } catch {}
                   }
                 } catch {}
@@ -1681,18 +1726,32 @@ def collect_filtered_stats_links(page) -> List[str]:
             """
         ) or []
         if isinstance(urls_from_frames, list) and urls_from_frames:
-            for href in urls_from_frames:
+            for item in urls_from_frames:
                 try:
+                    if isinstance(item, dict):
+                        href = item.get('href')
+                        row_text_full = item.get('rowText') or ''
+                    else:
+                        href = item
+                        row_text_full = ''
                     if not isinstance(href, str):
-                        continue;
+                        continue
                     abs_url = urljoin(base, href)
                     if abs_url in seen:
                         continue
                     seen.add(abs_url)
                     hrefs.append(abs_url)
+                    # Try attach league by matching known leagues in the row text
+                    try:
+                        if _KNOWN_LEAGUES and row_text_full:
+                            for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
+                                if isinstance(name, str) and name and name in row_text_full:
+                                    _LEAGUE_BY_URL[abs_url] = name
+                                    break
+                    except Exception:
+                        pass
                 except Exception:
                     continue
-            # Упрощённый режим: после визуальной фильтрации достаточно этих ссылок
             if hrefs:
                 _dbg('collect', f'collected (fast) {len(hrefs)} link(s)')
                 return hrefs
