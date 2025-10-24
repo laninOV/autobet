@@ -107,6 +107,21 @@ SAFE_MODE = True  # по умолчанию бережный режим: без 
 _PAUSED = False  # Пауза фонового сканирования/навигации
 _LAST_LIVE_LINKS: List[str] = []  # последние собранные ссылки со страницы live
 
+# Debug helper
+def _is_debug() -> bool:
+    try:
+        v = os.getenv('AUTOBET_DEBUG')
+        return not (v in (None, '', '0', 'false', 'False'))
+    except Exception:
+        return False
+
+def _dbg(tag: str, msg: str) -> None:
+    if _is_debug():
+        try:
+            print(f"[debug:{tag}] {msg}")
+        except Exception:
+            pass
+
 # Telegram API helpers (send/edit)
 _TG_TOKEN: Optional[str] = None
 _TG_CHAT_ID: Optional[str] = None
@@ -1053,6 +1068,7 @@ def run(filters: List[str]) -> None:
             pass
 
         page.goto(URL, wait_until="domcontentloaded")
+        _dbg('nav', f"opened {URL}")
         # Небольшая задержка для стабилизации отрисовки списка
         try:
             pre_collect_ms = int(getattr(args, 'pre_collect_ms', 400))
@@ -1078,6 +1094,7 @@ def run(filters: List[str]) -> None:
             allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
             excluded_js = json.dumps(excl or [], ensure_ascii=False)
             page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            _dbg('filter', f"applied with allowed={len(filters or [])} excluded={(len(excl or []))}")
             try:
                 page.evaluate("console.info('AUTO:filter applied')")
             except Exception:
@@ -1086,6 +1103,7 @@ def run(filters: List[str]) -> None:
             try:
                 cnt = page.evaluate('() => Array.from(document.querySelectorAll("a[href*=\\"/stats/?\\\"]")).filter(a => !a.closest(".__auto-filter-hidden__")).length')
                 print(f"[live] visible stats links after filter: {int(cnt) if isinstance(cnt,(int,float)) else cnt}")
+                _dbg('filter', f"visible links after filter: {cnt}")
             except Exception:
                 pass
         except Exception:
@@ -1253,7 +1271,9 @@ def run(filters: List[str]) -> None:
 
         # Первый прогон
         try:
+            _dbg('scan', 'initial restart_scan start')
             restart_scan(context, page, filters, stop_event)
+            _dbg('scan', 'initial restart_scan end')
         except Exception as e:
             print(f"[scan] Ошибка первого прогона: {e}")
 
@@ -1677,12 +1697,14 @@ def collect_filtered_stats_links(page) -> List[str]:
     # Далее — уточнение по основному фрейму, плюс попытка собрать счёт из строки
     anchors = page.locator("a[href*='/stats/?']")
     count = anchors.count()
+    _dbg('collect', f'anchors total={count}')
     for i in range(count):
         a = anchors.nth(i)
         try:
             # пропустим элементы внутри скрытых строк фильтра
             hidden = a.evaluate("el => !!el.closest('.__auto-filter-hidden__')")
             if hidden:
+                _dbg('collect', f'skip hidden #{i}')
                 continue
             # Определим контейнер строки и соберём текст
             row_text = a.evaluate(
@@ -1699,6 +1721,7 @@ def collect_filtered_stats_links(page) -> List[str]:
             if allowed:
                 low = row_text_full.lower()
                 if not any(s.lower() in low for s in allowed):
+                    _dbg('collect', f'skip by tournament #{i}')
                     continue
             # Эвристика LIVE: присутствуют признаки счёта/процесса
             has_score = bool(re.search(r"\b([0-5])\s*[:\-–—]\s*([0-5])\b", row_text))
@@ -1707,6 +1730,7 @@ def collect_filtered_stats_links(page) -> List[str]:
             prem_markers = ("прематч" in row_text) or ("up-games" in row_text) or ("начало" in row_text) or ("начнется" in row_text) or ("начнётся" in row_text) or ("через" in row_text and "мин" in row_text)
             if prem_markers and not (has_score or live_markers):
                 # Похоже на предматч — пропустим
+                _dbg('collect', f'skip prematch #{i}')
                 continue
 
             href = a.get_attribute("href") or ""
@@ -1717,6 +1741,7 @@ def collect_filtered_stats_links(page) -> List[str]:
                 continue
             seen.add(abs_url)
             hrefs.append(abs_url)
+            _dbg('collect', f'+ {abs_url}')
             # Try to capture current live score from the same row for this URL
             try:
                 score_info = a.evaluate(
@@ -1832,6 +1857,7 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
                     btn = page.locator(sel).first
                     if btn.is_visible(timeout=200):
                         btn.click(timeout=500)
+                        _dbg('expand', f"Clicked '{sel}'")
                         clicked = True
                         page.wait_for_timeout(pause_ms)
                         break
@@ -1852,10 +1878,11 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
             last_height = height
             page.evaluate("h => window.scrollTo(0, h)", height)
             page.wait_for_timeout(pause_ms)
+            _dbg('expand', f"window scroll to {height}")
 
         # Дополнительно: прокрутим потенциально прокручиваемые контейнеры (overflow-y: auto/scroll)
         try:
-            page.evaluate(
+            scrolled_cnt = page.evaluate(
                 r"""
                 () => {
                   const isScrollable = (el) => {
@@ -1870,6 +1897,10 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
                 }
                 """
             )
+            try:
+                _dbg('expand', f"scrolled {int(scrolled_cnt)} scrollable containers")
+            except Exception:
+                pass
         except Exception:
             pass
     except Exception:
@@ -2076,9 +2107,12 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
 
             # Дожидаемся (настраиваемое время), пока расширение отрисует блок (GO/3/3/2/3)
             # Независимый расчёт Формы(3) и логистики может занимать > 1 сек
+            _dbg('stats', 'waiting for decision block')
             wait_for_decision_block(page, timeout_ms=DECISION_WAIT_MS)
             lp, rp = parse_players_from_stats_url(url)
+            _dbg('stats', f'parsed URL params lp={lp} rp={rp}')
             fav, opp, _, reason = extract_favorite_and_opponents(page, lp=lp, rp=rp)
+            _dbg('stats', f'extract fav/opp result fav={fav} opp={opp} reason={reason}')
             # Server-safe fallback: если расширение отключено и DOM не дал имена,
             # но в URL есть lp/rp — используем их, даже если не смогли распарсить со страницы
             if not (fav and opp):
@@ -2100,6 +2134,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             if fav and opp and (reason or ALLOW_ALL or ALLOW_NOTIFY_ALL):
                 # Извлечь метрики для новой строки CSV
                 metrics = _extract_metrics_for_csv(page, fav, opp)
+                _dbg('stats', f'metrics: {metrics}')
                 save_match_row(url, fav, opp, metrics, output_csv)
                 # Telegram notify if configured (new formatted message using compare block if available)
                 try:
@@ -3431,6 +3466,8 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 page.wait_for_timeout(300)
             if not ok:
                 print("[live] warn: не вижу ссылок '/stats/?' — продолжаю с текущим DOM")
+            else:
+                _dbg('wait', f"found {int(v)} link(s) within {round(_t.monotonic()-start,2)}s")
         except Exception:
             pass
         try:
@@ -3440,8 +3477,10 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         except Exception:
             pass
         try:
+            _dbg('scan', 'collecting links on live page')
             links = collect_filtered_stats_links(page)
             print(f"[LIVE] Найдено страниц статистики после фильтра: {len(links)}")
+            _dbg('scan', f'live links collected: {len(links)}')
             try:
                 globals()['_LAST_LIVE_LINKS'] = list(links)
             except Exception:
