@@ -2080,6 +2080,8 @@ function renderFavOppCompare(payload) {
     const path = location.pathname || '';
     if (!/tennis-score\.pro$/.test(host)) return;
     if (!/\/live_v2\/?$/i.test(path)) return;
+    // Run only in top window (ignore iframes)
+    try { if (window.top !== window) return; } catch(_) { /* cross-origin safe */ }
 
     // Read allow/exclude from window or localStorage, else defaults
     const readList = (k, def=[]) => {

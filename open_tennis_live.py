@@ -1060,7 +1060,7 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
-        # Сразу применим визуальную фильтрацию по лигам на live-странице (во всех фреймах)
+        # Сразу применим визуальную фильтрацию по лигам на live-странице (только основной документ)
         try:
             # Передаём списки в localStorage — их подхватит content script расширения (все фреймы)
             try:
@@ -1075,14 +1075,16 @@ def run(filters: List[str]) -> None:
                 ex_env = os.getenv('AUTOBET_EXCLUDE', '')
                 if ex_env:
                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
-            _apply_filter_to_all_frames(page, filters, excl or [])
+            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+            excluded_js = json.dumps(excl or [], ensure_ascii=False)
+            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
             try:
                 page.evaluate("console.info('AUTO:filter applied')")
             except Exception:
                 pass
-            # Лёгкая диагностика: сколько видимых ссылок на /stats сейчас на экране
+            # Лёгкая диагностика: сколько видимых ссылок на /stats сейчас на экране (только основной документ)
             try:
-                cnt = _count_visible_stats_links_all_frames(page)
+                cnt = page.evaluate('() => Array.from(document.querySelectorAll("a[href*=\\"/stats/?\\\"]")).filter(a => !a.closest(".__auto-filter-hidden__")).length')
                 print(f"[live] visible stats links after filter: {int(cnt) if isinstance(cnt,(int,float)) else cnt}")
             except Exception:
                 pass
@@ -1176,10 +1178,10 @@ def run(filters: List[str]) -> None:
                 pass
 
         # Экспортируем функцию перезапуска в страницу и рендерим кнопку управления
-        # Опционально: мгновенное завершение по Enter (включается только флагом --tty-exit)
+        # Мгновенное завершение по Enter (в интерактивном TTY по умолчанию)
         stop_event = threading.Event()
-        # Активируем ожидание Enter только при явном флаге и интерактивном TTY
-        if (not getattr(args, 'headless', False)) and getattr(args, 'tty_exit', False) and sys.stdin and sys.stdin.isatty():
+        # Активируем ожидание Enter в интерактивном TTY (по умолчанию)
+        if (not getattr(args, 'headless', False)) and sys.stdin and sys.stdin.isatty():
             def _wait_for_enter():
                 try:
                     input()
@@ -3403,7 +3405,9 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 ex_env = os.getenv('AUTOBET_EXCLUDE', '')
                 if ex_env:
                     excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
-            _apply_filter_to_all_frames(page, filters or DEFAULT_FILTERS, excluded or [])
+            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+            excluded_js = json.dumps(excluded or [], ensure_ascii=False)
+            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
         except Exception:
             pass
         # Не очищаем результаты при повторных пересканах.
@@ -3411,14 +3415,15 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
 
         # 1) LIVE: текущая страница
         page.wait_for_timeout(800)
-        # Убедимся, что на странице (или во фреймах) появились ссылки на статистику
+        # Убедимся, что на странице появились ссылки на статистику
         try:
             import time as _t
             start = _t.monotonic()
             ok = False
             while _t.monotonic() - start < 10:
                 try:
-                    if _count_visible_stats_links_all_frames(page) > 0:
+                    v = page.evaluate('() => Array.from(document.querySelectorAll("a[href*=\\"/stats/?\\\"]")).filter(a => !a.closest(".__auto-filter-hidden__")).length')
+                    if isinstance(v, (int, float)) and v > 0:
                         ok = True
                         break
                 except Exception:
@@ -3431,7 +3436,7 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         try:
             # Обновим список лиг с live_v2 прежде чем собирать ссылки
             _update_known_leagues_from_page(page)
-            expand_live_list_all_frames(page)
+            expand_live_list(page)
         except Exception:
             pass
         try:
