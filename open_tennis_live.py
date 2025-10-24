@@ -1513,6 +1513,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     parser.add_argument("--score-interval", dest="score_interval", type=int, default=20,
                         help="Как часто обновлять счёт между сканами, сек (по умолчанию 20)")
+    parser.add_argument("--processed-ttl", dest="processed_ttl", type=int, default=0,
+                        help="Через сколько минут повторно открывать уже обработанные ссылки (0 = никогда в этом запуске)")
     parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
                         help="Разрешить мгновенный выход по Enter в терминале (по умолчанию выключено)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
@@ -2349,7 +2351,11 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                             _upsert_tg_message(url, msg, finished)
                 except Exception:
                     pass
-                processed.add(url)  # помечаем как обработанный только при успешном сохранении
+                # помечаем как обработанный только при успешном сохранении
+                try:
+                    processed.add(url)
+                except Exception:
+                    pass
                 print(f"[saved] {fav} vs {opp} ({url})")
                 saved += 1
             else:
@@ -3565,20 +3571,62 @@ def save_match_row(url: str, favorite: str, opponent: str, metrics: Tuple[Option
 
 
 def load_processed_urls(processed_path: str) -> Set[str]:
-    # Режим "свежий запуск": игнорировать прошлые processed
+    """Load processed URLs with TTL support.
+    Accepts legacy list format or new dict {url: unix_ts}.
+    Respects --processed-ttl-minutes if provided; 0 disables TTL (legacy behavior).
+    Returns only URLs that are still within TTL window.
+    """
+    # Fresh mode: ignore previous processed
     if os.getenv("AUTOBET_FRESH") or globals().get('_IGNORE_PROCESSED'):
         return set()
+    ttl_min = 0
+    try:
+        ttl_min = int(getattr(parse_args_for_runtime(), 'processed_ttl', 0) or 0)
+    except Exception:
+        ttl_min = 0
+    ttl_sec = max(0, ttl_min * 60)
+    now = time.time()
     try:
         with open(processed_path, "r", encoding="utf-8") as f:
-            return set(json.load(f))
+            data = json.load(f)
     except Exception:
+        data = None
+    if data is None:
         return set()
+    # Legacy list
+    if isinstance(data, list):
+        return set(data) if ttl_sec == 0 else set()  # without timestamps cannot honor TTL
+    # Dict with timestamps
+    if isinstance(data, dict):
+        out = set()
+        for url, ts in data.items():
+            try:
+                tsf = float(ts)
+                if ttl_sec == 0 or (now - tsf) <= ttl_sec:
+                    out.add(url)
+            except Exception:
+                continue
+        return out
+    return set()
 
 
 def save_processed_urls(data: Set[str], processed_path: str) -> None:
+    """Persist processed URLs with timestamp. Keeps previous timestamps for existing URLs."""
     try:
+        prev = {}
+        try:
+            with open(processed_path, "r", encoding="utf-8") as f:
+                j = json.load(f)
+                if isinstance(j, dict):
+                    prev = j
+                elif isinstance(j, list):
+                    prev = {u: time.time() for u in j}
+        except Exception:
+            prev = {}
+        now = time.time()
+        payload = {u: prev.get(u, now) for u in data}
         with open(processed_path, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(data)), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
