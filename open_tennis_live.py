@@ -225,6 +225,11 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
             ok = False
             if callable(_edit):
                 ok = bool(_edit(mid, text))
+                if os.getenv('AUTOBET_DEBUG'):
+                    try:
+                        print(f"[tg] edit mid={mid} ok={ok}")
+                    except Exception:
+                        pass
             if not ok and callable(_send):
                 new_id = _send(text)
                 if isinstance(new_id, int):
@@ -232,6 +237,12 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
                     _TG_MSG_BY_URL[canon] = new_id
                     mid = new_id
                     _save_tg_map()
+                else:
+                    if os.getenv('AUTOBET_DEBUG'):
+                        try:
+                            print(f"[tg] send after edit failed; no new id for {canon}")
+                        except Exception:
+                            pass
         else:
             if callable(_send):
                 new_id = _send(text)
@@ -240,6 +251,12 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
                     _TG_MSG_BY_URL[canon] = new_id
                     mid = new_id
                     _save_tg_map()
+                else:
+                    if os.getenv('AUTOBET_DEBUG'):
+                        try:
+                            print(f"[tg] send failed, no id for {canon}")
+                        except Exception:
+                            pass
         # persist last text
         if mid and isinstance(text, str):
             _LAST_TG_TEXT_BY_URL[url] = text
@@ -252,6 +269,11 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
                 final_text = text + "\n🏁 Игра завершена"
             if callable(_edit):
                 _edit(mid, final_text)
+                if os.getenv('AUTOBET_DEBUG'):
+                    try:
+                        print(f"[tg] final edit mid={mid}")
+                    except Exception:
+                        pass
                 _LAST_TG_TEXT_BY_URL[url] = final_text
                 _LAST_TG_TEXT_BY_URL[canon] = final_text
                 _save_tg_map()
@@ -994,6 +1016,10 @@ def run(filters: List[str]) -> None:
                         _tg_send(text)
                     global _TG_SENDER
                     _TG_SENDER = _send
+                    try:
+                        print(f"[tg] configured chat_id={_TG_CHAT_ID}")
+                    except Exception:
+                        pass
                     # Startup ping so user sees bot is alive
                     try:
                         ts = datetime.now().isoformat(timespec="seconds")
