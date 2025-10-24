@@ -1024,6 +1024,18 @@ def run(filters: List[str]) -> None:
                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
             excluded_js = json.dumps(excl or [], ensure_ascii=False)
             page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            try:
+                page.evaluate("console.info('AUTO:filter applied')")
+            except Exception:
+                pass
+            # Лёгкая диагностика: сколько видимых ссылок на /stats сейчас на экране
+            try:
+                cnt = page.evaluate(
+                    r"() => Array.from(document.querySelectorAll('a[href*=\"/stats/?\"]')).filter(a => !a.closest('.__auto-filter-hidden__')).length"
+                )
+                print(f"[live] visible stats links after filter: {int(cnt) if isinstance(cnt,(int,float)) else cnt}")
+            except Exception:
+                pass
         except Exception:
             pass
         # Диагностика CS: проверяем маркер загрузки контент‑скрипта
@@ -1114,10 +1126,10 @@ def run(filters: List[str]) -> None:
                 pass
 
         # Экспортируем функцию перезапуска в страницу и рендерим кнопку управления
-        # Также готовим мгновенное завершение по Enter (только в видимом режиме)
+        # Опционально: мгновенное завершение по Enter (включается только флагом --tty-exit)
         stop_event = threading.Event()
-        # Активируем ожидание Enter и UI-кнопку только в интерактивном TTY-режиме
-        if not getattr(args, 'headless', False) and sys.stdin and sys.stdin.isatty():
+        # Активируем ожидание Enter только при явном флаге и интерактивном TTY
+        if (not getattr(args, 'headless', False)) and getattr(args, 'tty_exit', False) and sys.stdin and sys.stdin.isatty():
             def _wait_for_enter():
                 try:
                     input()
@@ -1329,6 +1341,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
     parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
+    parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
+                        help="Разрешить мгновенный выход по Enter в терминале (по умолчанию выключено)")
     parser.add_argument("--decision-wait-ms", dest="decision_wait_ms", type=int, default=2000,
                         help="Сколько миллисекунд ждать отрисовку блока решения (по умолчанию 2000)")
     parser.add_argument("--fresh", dest="fresh", action="store_true", help="Игнорировать processed_* и пересканировать все найденные ссылки заново")
@@ -3272,6 +3286,14 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
 
         # 1) LIVE: текущая страница
         page.wait_for_timeout(800)
+        # Убедимся, что на странице появились ссылки на статистику
+        try:
+            page.wait_for_selector("a[href*='/stats/?']", timeout=10000)
+        except Exception:
+            try:
+                print("[live] warn: не вижу ссылок '/stats/?' — продолжаю с текущим DOM")
+            except Exception:
+                pass
         try:
             # Обновим список лиг с live_v2 прежде чем собирать ссылки
             _update_known_leagues_from_page(page)
