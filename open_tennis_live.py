@@ -73,8 +73,10 @@ DEFAULT_FILTERS = [
     # т.к. после него могут идти разные города/страны.
     "Лига Про",   # матчит любые варианты: "Лига Про. Минск", "Лига Про. Чехия" и т.п.
     "Кубок ТТ",   # матчит: "Кубок ТТ. Польша", "Кубок ТТ. Чехия" и др.
-    "Сетка Кап",  # матчит любые варианты после "Сетка Кап ..."
 ]
+
+# Лиги, которые нужно исключать всегда (в UI и при сборе ссылок)
+ALWAYS_EXCLUDED = ["Сетка Кап"]
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
 _SCAN_LOCK = threading.Lock()
@@ -106,6 +108,7 @@ DRIVE_UI = False
 SAFE_MODE = True  # по умолчанию бережный режим: без тяжёлых фильтров на странице
 _PAUSED = False  # Пауза фонового сканирования/навигации
 _LAST_LIVE_LINKS: List[str] = []  # последние собранные ссылки со страницы live
+_LIVE_LAST_SEEN: Dict[str, float] = {}  # mono time when link last seen on live
 
 # Debug helper
 def _is_debug() -> bool:
@@ -801,11 +804,8 @@ def run(filters: List[str]) -> None:
 
         # Allowed leagues policy:
         # If user provided positional filters, use them; otherwise use defaults and optional --setka
-        try:
-            env_setka = os.getenv('AUTOBET_SETKA')
-            want_setka = bool(getattr(args, 'setka', False)) or (env_setka is not None and str(env_setka).strip().lower() not in ('', '0', 'false', 'no'))
-        except Exception:
-            want_setka = False
+        # "Сетка Кап" исключаем навсегда — опции setka/AUTOBET_SETKA игнорируем
+        want_setka = False
         try:
             user_filters = getattr(args, 'filters', None)
         except Exception:
@@ -813,8 +813,8 @@ def run(filters: List[str]) -> None:
         if user_filters:
             filters = list(user_filters)
         else:
-            # По умолчанию берём «Лига Про» (включая варианты: Минск, Чехия и т.п.) и «Кубок ТТ» (Польша, Чехия и т.д.)
-            filters = ["Лига Про", "Кубок ТТ"] + (["Сетка Кап"] if want_setka else [])
+            # По умолчанию берём «Лига Про» и «Кубок ТТ». «Сетка Кап» исключаем всегда.
+            filters = ["Лига Про", "Кубок ТТ"]
         try:
             # Обновим глобальный список допускаемых турниров (для доп. фильтра при сборе ссылок)
             global _ALLOWED_TOURNAMENTS
@@ -1110,9 +1110,10 @@ def run(filters: List[str]) -> None:
             pass
         # Сразу применим визуальную фильтрацию по лигам на live-странице (только основной документ)
         try:
-            # Передаём списки в localStorage — их подхватит content script расширения (все фреймы)
+            # Передаём списки в localStorage — их подхватит content script расширения
             try:
-                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, (getattr(args,'exclude',None) or []))
+                excl_loc = (getattr(args,'exclude',None) or []) + ALWAYS_EXCLUDED
+                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, excl_loc)
             except Exception:
                 pass
             try:
@@ -1123,6 +1124,7 @@ def run(filters: List[str]) -> None:
                 ex_env = os.getenv('AUTOBET_EXCLUDE', '')
                 if ex_env:
                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
+            excl = (excl or []) + ALWAYS_EXCLUDED
             allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
             excluded_js = json.dumps(excl or [], ensure_ascii=False)
             page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
@@ -1176,7 +1178,7 @@ def run(filters: List[str]) -> None:
             print("[login] не удалось проверить статус, продолжаю…")
 
         allowed_js = json.dumps(filters, ensure_ascii=False)
-        # Prepare excluded leagues list from args/env
+        # Prepare excluded leagues list from args/env + ALWAYS_EXCLUDED
         try:
             excluded = getattr(args, 'exclude', None)
         except Exception:
@@ -1185,7 +1187,7 @@ def run(filters: List[str]) -> None:
             ex_env = os.getenv('AUTOBET_EXCLUDE', '')
             if ex_env:
                 excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
-        excluded = excluded or []
+        excluded = (excluded or []) + ALWAYS_EXCLUDED
         excluded_js = json.dumps(excluded, ensure_ascii=False)
         # В SAFE-режиме не добавляем тяжёлые скрипты фильтра вообще — фильтрация будет на стороне парсера
         try:
@@ -1741,6 +1743,11 @@ def collect_filtered_stats_links(page) -> List[str]:
                         continue
                     seen.add(abs_url)
                     hrefs.append(abs_url)
+                    try:
+                        canon = _canonical_stats_url(abs_url)
+                        _LIVE_LAST_SEEN[canon] = time.monotonic()
+                    except Exception:
+                        pass
                     # Try attach league by matching known leagues in the row text
                     try:
                         if _KNOWN_LEAGUES and row_text_full:
@@ -3234,9 +3241,7 @@ def _format_tg_message_new(
                     except Exception:
                         pass
                     line = f"🎯 {out_score:.2f} | {badge} | {stake_part}"
-                    # По умолчанию детали выключены; включаются флагом --details
-                    if pattern_note and globals().get('_SHOW_DETAILS'):
-                        line = line + "\n" + f"ℹ️ {esc(pattern_note)}"
+                    # Пользователь просил не добавлять дополнительную строку с пояснением паттерна
                     return line
                 except Exception:
                     return ''
@@ -3526,7 +3531,8 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 if ex_env:
                     excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
             allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
-            excluded_js = json.dumps(excluded or [], ensure_ascii=False)
+            excluded = (excluded or []) + ALWAYS_EXCLUDED
+            excluded_js = json.dumps(excluded, ensure_ascii=False)
             page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
         except Exception:
             pass
@@ -3576,6 +3582,30 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
         # Быстро обновим live-счёты в уже отправленных сообщениях, не открывая страницы
         try:
             _refresh_live_scores(links)
+        except Exception:
+            pass
+        # Финализируем сообщения для матчей, исчезнувших из live-списка (чтобы поставить 🏁)
+        try:
+            try:
+                now = time.monotonic()
+                current = set(_canonical_stats_url(u) for u in links)
+            except Exception:
+                current = set()
+            # Кандидаты: были отправлены ранее, сейчас не видны, не помечены завершёнными
+            for url_key in list(_TG_MSG_BY_URL.keys()):
+                try:
+                    canon = _canonical_stats_url(url_key)
+                    if canon in current or canon in _MATCH_DONE:
+                        continue
+                    last = _LIVE_LAST_SEEN.get(canon)
+                    if last is None or (now - last) < 60:
+                        continue
+                    # Есть последнее сообщение — добавим флаг завершения
+                    last_text = _LAST_TG_TEXT_BY_URL.get(canon) or _LAST_TG_TEXT_BY_URL.get(url_key)
+                    if last_text:
+                        _upsert_tg_message(url_key, last_text, finished=True)
+                except Exception:
+                    continue
         except Exception:
             pass
         try:
