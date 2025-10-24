@@ -1692,6 +1692,10 @@ def collect_filtered_stats_links(page) -> List[str]:
                     hrefs.append(abs_url)
                 except Exception:
                     continue
+            # Упрощённый режим: после визуальной фильтрации достаточно этих ссылок
+            if hrefs:
+                _dbg('collect', f'collected (fast) {len(hrefs)} link(s)')
+                return hrefs
     except Exception:
         pass
     # Далее — уточнение по основному фрейму, плюс попытка собрать счёт из строки
