@@ -1850,6 +1850,26 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
             last_height = height
             page.evaluate("h => window.scrollTo(0, h)", height)
             page.wait_for_timeout(pause_ms)
+
+        # Дополнительно: прокрутим потенциально прокручиваемые контейнеры (overflow-y: auto/scroll)
+        try:
+            page.evaluate(
+                r"""
+                () => {
+                  const isScrollable = (el) => {
+                    try { const st = getComputedStyle(el); const oy = st.overflowY; return /(auto|scroll)/.test(oy) && (el.scrollHeight - el.clientHeight > 20); } catch { return false; }
+                  };
+                  const cand = Array.from(document.querySelectorAll('div,main,section,ul,table,tbody'))
+                    .filter(isScrollable)
+                    .sort((a,b)=> (b.scrollHeight-b.clientHeight) - (a.scrollHeight-a.clientHeight))
+                    .slice(0,3);
+                  cand.forEach(el => { try { el.scrollTop = el.scrollHeight; } catch {} });
+                  return cand.length;
+                }
+                """
+            )
+        except Exception:
+            pass
     except Exception:
         pass
 
