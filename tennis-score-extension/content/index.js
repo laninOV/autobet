@@ -2073,6 +2073,70 @@ function renderFavOppCompare(payload) {
   } catch {}
 })();
 
+// --- Live_v2 league filter (runs in all frames due to all_frames) ---
+(function(){
+  try {
+    const host = (location.hostname||'').toLowerCase();
+    const path = location.pathname || '';
+    if (!/tennis-score\.pro$/.test(host)) return;
+    if (!/\/live_v2\/?$/i.test(path)) return;
+
+    // Read allow/exclude from window or localStorage, else defaults
+    const readList = (k, def=[]) => {
+      try {
+        if (Array.isArray(window[k])) return window[k].filter(x=>typeof x==='string');
+      } catch(_) {}
+      try {
+        const v = localStorage.getItem(k);
+        if (v) { const arr = JSON.parse(v); if (Array.isArray(arr)) return arr.filter(x=>typeof x==='string'); }
+      } catch(_) {}
+      return def.slice();
+    };
+    const allowed = readList('__AUTO_ALLOW', ['Лига Про','Кубок ТТ','Сетка Кап']);
+    const excluded = readList('__AUTO_EXCLUDE', []);
+
+    const ensureStyle = () => {
+      const id = '__auto-live-filter-style__';
+      if (document.getElementById(id)) return;
+      const s = document.createElement('style');
+      s.id = id;
+      s.textContent = '.__auto-filter-hidden__{display:none!important}';
+      document.documentElement.appendChild(s);
+    };
+    ensureStyle();
+
+    const matchesAllowed = (txt) => {
+      const t = String(txt||'').toLowerCase();
+      if (!t) return false;
+      const ok = (allowed.length? allowed.some(s => t.includes(String(s).toLowerCase())) : true);
+      const bad = (excluded.length? excluded.some(s => t.includes(String(s).toLowerCase())) : false);
+      return ok && !bad;
+    };
+
+    const candidatesSelector = 'tbody tr, tr, [role="row"], .row, .list-item, .match, li';
+    const filterOnce = () => {
+      try {
+        const nodes = Array.from(document.querySelectorAll(candidatesSelector));
+        for (const el of nodes) {
+          const text = (el.innerText||el.textContent||'').replace(/\s+/g,' ').trim();
+          if (!text) continue;
+          const show = matchesAllowed(text);
+          if (show) el.classList.remove('__auto-filter-hidden__');
+          else el.classList.add('__auto-filter-hidden__');
+        }
+      } catch(_) {}
+    };
+
+    // Initial and reactive
+    filterOnce();
+    try {
+      const mo = new MutationObserver(() => { try { filterOnce(); } catch(_){} });
+      mo.observe(document.documentElement, {childList:true, subtree:true});
+      setInterval(()=>{ try{ filterOnce(); }catch(_){ } }, 3000);
+    } catch(_) {}
+  } catch(_) {}
+})();
+
 // --- Ensure inline FCI appears right before <pre id="favImproved"> ---
 function ensureFCIInline() {
   if (window.__TSX_SERVER_MODE__) return; // server mode: skip extra compute

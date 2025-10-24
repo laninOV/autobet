@@ -1062,6 +1062,11 @@ def run(filters: List[str]) -> None:
             pass
         # Сразу применим визуальную фильтрацию по лигам на live-странице (во всех фреймах)
         try:
+            # Передаём списки в localStorage — их подхватит content script расширения (все фреймы)
+            try:
+                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, (getattr(args,'exclude',None) or []))
+            except Exception:
+                pass
             try:
                 excl = getattr(args, 'exclude', None)
             except Exception:
