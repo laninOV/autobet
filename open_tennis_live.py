@@ -359,15 +359,31 @@ def _compose_score_with_sets(url: str, base_score: Optional[str]) -> Optional[st
         # If we have per-set pairs, derive a safer total score from them
         try:
             def _derive_score(pairs: List[str]) -> Optional[str]:
+                """Derive total sets only from completed sets.
+                A set is considered complete if one side reached ≥11 AND lead ≥2.
+                This avoids counting in‑progress sets like 1:3 or 10:9.
+                """
                 try:
                     a_w = 0; b_w = 0
+                    any_completed = False
                     for it in pairs:
-                        a,b = str(it).split(':',1)
-                        aa = int(re.sub(r"\D","", a) or 0)
-                        bb = int(re.sub(r"\D","", b) or 0)
-                        if aa>bb: a_w+=1
-                        elif bb>aa: b_w+=1
-                    if a_w==0 and b_w==0:
+                        try:
+                            a,b = str(it).split(':',1)
+                            aa = int(re.sub(r"\D","", a) or 0)
+                            bb = int(re.sub(r"\D","", b) or 0)
+                        except Exception:
+                            continue
+                        # completed set rule
+                        if (aa >= 11 or bb >= 11) and abs(aa - bb) >= 2:
+                            any_completed = True
+                            if aa > bb:
+                                a_w += 1
+                            elif bb > aa:
+                                b_w += 1
+                        else:
+                            # skip in-progress set
+                            continue
+                    if not any_completed:
                         return None
                     return f"{a_w}:{b_w}"
                 except Exception:
