@@ -3,6 +3,10 @@
   if (typeof window !== 'undefined') {
     if (window.__TSX_CONTENT_LOADED__) return; // already loaded
     window.__TSX_CONTENT_LOADED__ = true;
+    // Also mark in DOM so page-world can detect from Playwright
+    try { if (typeof document !== 'undefined' && document.documentElement) {
+      document.documentElement.setAttribute('data-tsx-content-loaded', '1');
+    } } catch(_) {}
   }
 
 /*

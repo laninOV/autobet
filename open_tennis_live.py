@@ -102,6 +102,9 @@ _STAKE_IS_FAV_BY_URL: Dict[str, Optional[bool]] = {}
 _SHOW_DETAILS = False
 _GLOBAL_EXT_PATH: Optional[str] = None
 _CONTENT_JS_CACHE: Optional[str] = None
+DRIVE_UI = False
+SAFE_MODE = True  # по умолчанию бережный режим: без тяжёлых фильтров на странице
+_PAUSED = False  # Пауза фонового сканирования/навигации
 
 # Telegram API helpers (send/edit)
 _TG_TOKEN: Optional[str] = None
@@ -165,8 +168,11 @@ def _ensure_content_script(context, page, ext_path: Optional[str]) -> bool:
         js = _CONTENT_JS_CACHE
         if not js:
             return False
+        # добавляем init_script только один раз на контекст
         try:
-            context.add_init_script(js)
+            if not getattr(context, "__autobet_init_injected__", False):
+                context.add_init_script(js)
+                setattr(context, "__autobet_init_injected__", True)
         except Exception:
             pass
         try:
@@ -407,6 +413,7 @@ CONTROL_JS = r"""
         padding: 6px 10px; cursor: pointer; font-weight: 600;
       }
       .__auto-controls__ button[disabled] { opacity: .6; cursor: default; }
+      .__auto-controls__ .pause { background:#a87900; }
     `;
     document.documentElement.appendChild(s);
   }
@@ -437,7 +444,23 @@ CONTROL_JS = r"""
         setTimeout(() => { btn.textContent = '⟲ Перезапустить автоскан'; btn.disabled = false; }, 1500);
       }
     });
+    const pause = document.createElement('button');
+    pause.type = 'button';
+    pause.className = 'pause';
+    let paused = false;
+    const sync = () => { pause.textContent = paused? '▶ Продолжить' : '⏸ Пауза'; };
+    sync();
+    pause.addEventListener('click', async () => {
+      try {
+        pause.disabled = true;
+        if (typeof window.autobetTogglePause === 'function') {
+          paused = await window.autobetTogglePause();
+          sync();
+        }
+      } finally { pause.disabled = false; }
+    });
     box.appendChild(btn);
+    box.appendChild(pause);
     document.body.appendChild(box);
   }
   return true;
@@ -544,6 +567,45 @@ FILTER_JS = r"""
   setInterval(debounced, 2000);
 
   return true;
+})()
+"""
+
+# Лёгкий фильтр: без MutationObserver, только периодический проход (меньше нагрузка на Chromium)
+FILTER_JS_LIGHT = r"""
+(() => {
+  const ALLOWED = new Set(%(allowed)s);
+  const EXCLUDED = new Set(%(excluded)s);
+  const styleId = '__auto_filter_style__';
+  if (!document.getElementById(styleId)) {
+    const s = document.createElement('style');
+    s.id = styleId;
+    s.textContent = `
+      .__auto-filter-badge__ { position: fixed; right: 12px; bottom: 12px; z-index: 99999; background: rgba(20,20,20,.8); color:#fff; font:12px/1.4 sans-serif; padding:8px 10px; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,.3); }
+      .__auto-filter-badge__ code { color:#9be; }
+      .__auto-filter-hidden__ { display:none !important; }
+    `;
+    document.documentElement.appendChild(s);
+  }
+  function ensureBadge(){ let b=document.querySelector('.__auto-filter-badge__'); if(!b){ b=document.createElement('div'); b.className='__auto-filter-badge__'; const a=Array.from(ALLOWED).map(s=>`<code>${s}</code>`).join(', ')||'все'; const e=Array.from(EXCLUDED).map(s=>`<code>${s}</code>`).join(', '); b.innerHTML=`Фильтр: ${a}`+(e?`<br>Исключено: ${e}`:''); document.body.appendChild(b);} return b; }
+  function apply(){
+    const tables = Array.from(document.querySelectorAll('table'));
+    for(const table of tables){
+      const thead = table.tHead || table.querySelector('thead'); if(!thead) continue;
+      const headerCells = Array.from(thead.querySelectorAll('th, td'));
+      const idx = headerCells.findIndex(th => /\bТурнир\b/i.test(th.textContent||'')); if(idx===-1) continue;
+      const rows = table.tBodies.length? Array.from(table.tBodies[0].rows): Array.from(table.querySelectorAll('tbody tr, tr'));
+      for(const tr of rows){
+        const cells = tr.cells ? Array.from(tr.cells): Array.from(tr.querySelectorAll('td'));
+        if(!cells.length) continue; const cell = cells[idx] || cells[cells.length-1];
+        const txt = (cell && cell.textContent)? (cell.textContent).trim(): (tr.textContent||'').trim();
+        const blocked = Array.from(EXCLUDED).some(s => txt.includes(s));
+        const allowed = (ALLOWED.size? Array.from(ALLOWED).some(s => txt.includes(s)) : true);
+        tr.classList.toggle('__auto-filter-hidden__', !(allowed && !blocked));
+      }
+    }
+    ensureBadge();
+  }
+  apply(); setInterval(apply, 3000); return true;
 })()
 """
 
@@ -819,6 +881,7 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
+        # Всегда пытаемся загрузить расширение, если оно доступно
         if ext_path and os.path.isdir(ext_path):
             # Use persistent context to load extension
             user_data_dir = os.path.join(os.path.dirname(__file__), ".chromium-profile")
@@ -886,14 +949,18 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
-        # Диагностика: проверим, подхватился ли контент‑скрипт расширения на live_v2
+        # Диагностика/инъекция CS: всегда пробуем активировать контент‑скрипт
         try:
-            loaded = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+            loaded = page.evaluate(
+                "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
+            )
             if not loaded:
                 print("[ext] предупреждение: контент‑скрипт не виден на live_v2 — пробую инъекцию JS…")
                 _ensure_content_script(context, page, globals().get('_GLOBAL_EXT_PATH'))
                 try:
-                    loaded2 = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+                    loaded2 = page.evaluate(
+                        "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
+                    )
                     if loaded2:
                         print("[ext] content‑script активирован принудительно")
                     else:
@@ -915,8 +982,15 @@ def run(filters: List[str]) -> None:
         password = args.password or os.getenv("TENNIS_PASSWORD") or "FiksA732528"
 
         print("Проверяю авторизацию...")
-        if not ensure_login(context, page, email, password):
-            print("[login] Предупреждение: не удалось войти. Продолжаю без авторизации.")
+        try:
+            if is_logged_in(page):
+                print("[login] уже авторизован")
+            else:
+                if not ensure_login(context, page, email, password):
+                    print("[login] Предупреждение: не удалось войти. Продолжаю без авторизации.")
+        except Exception:
+            # На всякий случай не блокируем поток
+            print("[login] не удалось проверить статус, продолжаю…")
 
         allowed_js = json.dumps(filters, ensure_ascii=False)
         # Prepare excluded leagues list from args/env
@@ -930,8 +1004,19 @@ def run(filters: List[str]) -> None:
                 excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
         excluded = excluded or []
         excluded_js = json.dumps(excluded, ensure_ascii=False)
-
-        page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+        # В SAFE-режиме не добавляем тяжёлые скрипты фильтра вообще — фильтрация будет на стороне парсера
+        try:
+            unsafe = bool(getattr(args, 'unsafe', False) or (os.getenv('AUTOBET_UNSAFE') not in (None, '', '0', 'false', 'False')))
+        except Exception:
+            unsafe = False
+        globals()['SAFE_MODE'] = (not unsafe)
+        if not globals()['SAFE_MODE']:
+            # Только когда явно выключили SAFE, добавляем фильтрацию на страницу
+            try:
+                light = bool(os.getenv('AUTOBET_LIGHT') not in (None, '', '0', 'false', 'False') or getattr(args, 'light', False))
+            except Exception:
+                light = False
+            page.evaluate((FILTER_JS_LIGHT if light else FILTER_JS) % {"allowed": allowed_js, "excluded": excluded_js})
         # Обновим список лиг с текущей страницы
         try:
             _update_known_leagues_from_page(page)
@@ -949,7 +1034,9 @@ def run(filters: List[str]) -> None:
                             text = text()
                         if callable(ctype):
                             ctype = ctype()
-                        if os.getenv("AUTOBET_CONSOLE") or (isinstance(text, str) and "AUTO:" in text):
+                        # По умолчанию печатаем только наши логи (AUTO:…)
+                        # Полный поток — только при AUTOBET_CONSOLE_ALL=1
+                        if (os.getenv("AUTOBET_CONSOLE_ALL") not in (None, '', '0', 'false', 'False') ) or (isinstance(text, str) and "AUTO:" in text):
                             print(f"[console:{ctype}] {text}")
                     except Exception:
                         pass
@@ -1002,6 +1089,14 @@ def run(filters: List[str]) -> None:
 
             try:
                 page.expose_function("autobetRestart", _restart_from_ui)
+                # Пауза/продолжить
+                def _toggle_pause():
+                    try:
+                        globals()['_PAUSED'] = not globals().get('_PAUSED', False)
+                        return bool(globals()['_PAUSED'])
+                    except Exception:
+                        return False
+                page.expose_function("autobetTogglePause", _toggle_pause)
             except Exception:
                 # Если уже экспортирована — игнорируем
                 pass
@@ -1017,6 +1112,9 @@ def run(filters: List[str]) -> None:
             if globals()['_IGNORE_PROCESSED']:
                 print("[fresh] processed_* будет проигнорирован для этого запуска")
             globals()['_SHOW_DETAILS'] = bool(getattr(args, 'details', False) or (os.getenv('AUTOBET_DETAILS') not in (None, '', '0', 'false', 'False')))
+            globals()['DRIVE_UI'] = bool(getattr(args, 'drive_ui', False) or (os.getenv('AUTOBET_DRIVE_UI') not in (None, '', '0', 'false', 'False')))
+            if globals()['DRIVE_UI']:
+                print("[ui] Режим drive-ui: навигация по /stats в видимой вкладке")
         except Exception:
             pass
 
@@ -1049,6 +1147,10 @@ def run(filters: List[str]) -> None:
         deadline = time.monotonic() + bg_minutes * 60
         try:
             while time.monotonic() < deadline and not stop_event.is_set():
+                if globals().get('_PAUSED', False):
+                    print("[pause] Тик пропущен — режим Пауза")
+                    time.sleep(max(2, int(interval_sec)))
+                    continue
                 try:
                     page.evaluate("console.info('AUTO:bg tick')")
                 except Exception:
@@ -1539,8 +1641,9 @@ def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
             if not clicked:
                 break
 
-        # Прокрутка страницы для загрузки виртуализированных элементов
+        # Прокрутка страницы для загрузки виртуализованных элементов (щадяще)
         last_height = 0
+        max_scrolls = max(3, min(max_scrolls, 8))
         for _ in range(max_scrolls):
             height = page.evaluate("() => document.scrollingElement ? document.scrollingElement.scrollHeight : document.body.scrollHeight")
             if not isinstance(height, (int, float)):
@@ -1694,10 +1797,19 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 print(f"[skip:processed] {url}")
             continue
         try:
-            page = context.new_page()
-            # На всякий случай инъектим контент‑скрипт до загрузки /stats, если не активен
+            if globals().get('DRIVE_UI') and context.pages:
+                page = context.pages[0]
+                try:
+                    page.bring_to_front()
+                except Exception:
+                    pass
+            else:
+                page = context.new_page()
+            # На вкладках /stats также пытаемся активировать контент‑скрипт
             try:
-                ok = page.evaluate("() => !!window.__TSX_CONTENT_LOADED__")
+                ok = page.evaluate(
+                    "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
+                )
             except Exception:
                 ok = False
             if not ok:
@@ -1833,7 +1945,13 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             print(f"[error] {url}: {e}")
         finally:
             try:
-                page.close()
+                if not globals().get('DRIVE_UI'):
+                    page.close()
+                else:
+                    try:
+                        page.goto(URL, wait_until="domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # Не помечаем как processed, если не было сохранения —
