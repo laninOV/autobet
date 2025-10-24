@@ -610,6 +610,55 @@ FILTER_JS_LIGHT = r"""
 })()
 """
 
+def _apply_filter_to_all_frames(page, filters: List[str], excluded: Optional[List[str]] = None) -> None:
+    try:
+        allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
+    except Exception:
+        allowed_js = json.dumps(DEFAULT_FILTERS, ensure_ascii=False)
+    try:
+        excluded_js = json.dumps(excluded or [], ensure_ascii=False)
+    except Exception:
+        excluded_js = '[]'
+    # Apply in main frame
+    try:
+        page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+    except Exception:
+        pass
+    # Apply in same-origin iframes
+    try:
+        for fr in page.frames:
+            try:
+                if fr == page.main_frame:
+                    continue
+                fr.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+def _count_visible_stats_links_all_frames(page) -> int:
+    total = 0
+    script = '() => Array.from(document.querySelectorAll("a[href*=\\"/stats/?\\\"]")).filter(a => !a.closest(".__auto-filter-hidden__")).length'
+    try:
+        v = page.evaluate(script)
+        if isinstance(v, (int, float)):
+            total += int(v)
+    except Exception:
+        pass
+    try:
+        for fr in page.frames:
+            try:
+                if fr == page.main_frame:
+                    continue
+                v = fr.evaluate(script)
+                if isinstance(v, (int, float)):
+                    total += int(v)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return total
+
 
 def _init_output_files():
     """Hard-reset output files and create fresh CSV with header.
@@ -1011,9 +1060,8 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
-        # Сразу применим визуальную фильтрацию по лигам на live-странице
+        # Сразу применим визуальную фильтрацию по лигам на live-странице (во всех фреймах)
         try:
-            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
             try:
                 excl = getattr(args, 'exclude', None)
             except Exception:
@@ -1022,17 +1070,14 @@ def run(filters: List[str]) -> None:
                 ex_env = os.getenv('AUTOBET_EXCLUDE', '')
                 if ex_env:
                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
-            excluded_js = json.dumps(excl or [], ensure_ascii=False)
-            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            _apply_filter_to_all_frames(page, filters, excl or [])
             try:
                 page.evaluate("console.info('AUTO:filter applied')")
             except Exception:
                 pass
             # Лёгкая диагностика: сколько видимых ссылок на /stats сейчас на экране
             try:
-                cnt = page.evaluate(
-                    r"() => Array.from(document.querySelectorAll('a[href*=\"/stats/?\"]')).filter(a => !a.closest('.__auto-filter-hidden__')).length"
-                )
+                cnt = _count_visible_stats_links_all_frames(page)
                 print(f"[live] visible stats links after filter: {int(cnt) if isinstance(cnt,(int,float)) else cnt}")
             except Exception:
                 pass
@@ -3266,8 +3311,7 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
     try:
         # Обновим визуальный фильтр на live-странице (чтобы UI сразу показывал только нужные лиги)
         try:
-            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
-            # reuse excluded from main args/env
+            # reuse excluded from main args/env and apply to all frames
             try:
                 args = parse_args_for_runtime()
                 excluded = getattr(args, 'exclude', None)
@@ -3277,8 +3321,7 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 ex_env = os.getenv('AUTOBET_EXCLUDE', '')
                 if ex_env:
                     excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
-            excluded_js = json.dumps(excluded or [], ensure_ascii=False)
-            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            _apply_filter_to_all_frames(page, filters or DEFAULT_FILTERS, excluded or [])
         except Exception:
             pass
         # Не очищаем результаты при повторных пересканах.
