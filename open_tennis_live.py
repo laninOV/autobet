@@ -881,11 +881,48 @@ def run(filters: List[str]) -> None:
         except Exception:
             pass
 
-        # Всегда пытаемся загрузить расширение, если оно доступно
-        if ext_path and os.path.isdir(ext_path):
+        # Всегда пытаемся загрузить расширение, если оно доступно и среда позволяет
+        no_ext_flag = False
+        try:
+            # CLI flag or env to disable extension explicitly
+            no_ext_flag = bool(os.getenv('AUTOBET_NO_EXTENSION'))
+        except Exception:
+            no_ext_flag = False
+        try:
+            if getattr(args, 'no_extension', False):
+                no_ext_flag = True
+        except Exception:
+            pass
+        # Не блокируем расширение по DISPLAY: на macOS DISPLAY обычно пустой, но headful работает
+        try:
+            headless_cli = bool(getattr(args, 'headless', False))
+        except Exception:
+            headless_cli = False
+        want_extension = bool(ext_path and os.path.isdir(ext_path) and not no_ext_flag and not headless_cli)
+        try:
+            print(f"[ext] режим: {'с расширением' if want_extension else 'без расширения'}")
+        except Exception:
+            pass
+
+        # Decide whether to enable server perf throttling for content script
+        perf_server = False
+        try:
+            perf_server = bool(os.getenv('AUTOBET_PERF','').lower() == 'server' or getattr(args, 'server_perf', False) or os.getenv('AUTOBET_SERVER'))
+        except Exception:
+            perf_server = False
+
+        if want_extension:
             # Use persistent context to load extension
             user_data_dir = os.path.join(os.path.dirname(__file__), ".chromium-profile")
             os.makedirs(user_data_dir, exist_ok=True)
+            # Clean stale Chromium profile locks to avoid startup hang
+            try:
+                for fname in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                    pth = os.path.join(user_data_dir, fname)
+                    if os.path.exists(pth):
+                        os.remove(pth)
+            except Exception:
+                pass
             # Extensions не поддерживаются в headless-режиме — принудительно выключим headless,
             # чтобы расширение гарантированно подхватилось (особенно при запуске от root)
             try:
@@ -907,30 +944,54 @@ def run(filters: List[str]) -> None:
                 f"--disable-extensions-except={ext_path}",
                 f"--load-extension={ext_path}",
             ] + extra_args
-            context = p.chromium.launch_persistent_context(
-                user_data_dir,
-                headless=headless_for_ext,
-                args=args_list,
-            )
+            try:
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=headless_for_ext,
+                    args=args_list,
+                )
+            except Exception as e:
+                print(f"[ext] не удалось запустить Chromium с расширением: {e}")
+                print("[ext] продолжаю без расширения (headless)")
+                want_extension = False
+                context = None
             try:
                 globals()['_GLOBAL_CONTEXT'] = context
                 globals()['_GLOBAL_EXT_PATH'] = ext_path
+                # Optional: set server perf flag for content script across all pages
+                if perf_server:
+                    try:
+                        context.add_init_script("try{ localStorage.setItem('__TSX_PERF','server'); window.__TSX_SERVER_MODE__=true; }catch(_){ }")
+                    except Exception:
+                        pass
             except Exception:
                 pass
-            page = context.new_page() if len(context.pages) == 0 else context.pages[0]
-            try:
-                print(f"[ext] загружено из: {ext_path}")
-            except Exception:
-                pass
-        else:
+            if context is not None:
+                page = context.new_page() if len(context.pages) == 0 else context.pages[0]
+                try:
+                    print(f"[ext] загружено из: {ext_path}")
+                except Exception:
+                    pass
+
+        if not want_extension:
             # Regular non-persistent context (no extension)
-            browser = p.chromium.launch(headless=bool(getattr(args, 'headless', False)))
+            headless_flag = True
+            try:
+                headless_flag = bool(getattr(args, 'headless', False) or os.getenv('AUTOBET_HEADLESS'))
+            except Exception:
+                headless_flag = True
+            browser = p.chromium.launch(headless=headless_flag, args=["--disable-dev-shm-usage"]) 
             storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
             context = browser.new_context(storage_state=storage)
             page = context.new_page()
             try:
                 globals()['_GLOBAL_CONTEXT'] = context
                 globals()['_GLOBAL_BROWSER'] = browser
+                if perf_server:
+                    try:
+                        context.add_init_script("try{ localStorage.setItem('__TSX_PERF','server'); window.__TSX_SERVER_MODE__=true; }catch(_){ }")
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -949,24 +1010,16 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
-        # Диагностика/инъекция CS: всегда пробуем активировать контент‑скрипт
+        # Диагностика CS: проверяем маркер загрузки контент‑скрипта
         try:
             loaded = page.evaluate(
                 "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
             )
             if not loaded:
-                print("[ext] предупреждение: контент‑скрипт не виден на live_v2 — пробую инъекцию JS…")
-                _ensure_content_script(context, page, globals().get('_GLOBAL_EXT_PATH'))
                 try:
-                    loaded2 = page.evaluate(
-                        "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
-                    )
-                    if loaded2:
-                        print("[ext] content‑script активирован принудительно")
-                    else:
-                        print("[ext] предупреждение: инъекция не удалась, будет использован fallback")
+                    print("[ext] маркер контент‑скрипта не найден (OK на первом рендере); продолжаю")
                 except Exception:
-                    print("[ext] предупреждение: не удалось проверить состояние скрипта после инъекции")
+                    pass
         except Exception:
             pass
 
@@ -1230,6 +1283,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EXTENSION_PATH,
         help="Путь к Chrome-расширению (будет загружено в persistent-профиль)",
     )
+    parser.add_argument("--no-extension", dest="no_extension", action="store_true",
+                        help="Запуск без загрузки расширения (подходит для серверов и headless)")
+    parser.add_argument("--server-perf", dest="server_perf", action="store_true",
+                        help="Упрощённый режим встраивания (снижение нагрузки контент‑скрипта)")
     # Фоновый режим (без окон): поддерживаем краткую форму -fon и длинную --headless
     parser.add_argument("-fon", "--headless", dest="headless", action="store_true",
                         help="Запуск Chromium в фоне (без окон). Требует поддержку headless-режима для расширений.")
@@ -1805,15 +1862,14 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                     pass
             else:
                 page = context.new_page()
-            # На вкладках /stats также пытаемся активировать контент‑скрипт
+            # На вкладках /stats проверяем маркер скрипта (без принудительной инъекции)
             try:
                 ok = page.evaluate(
                     "() => (document.documentElement && document.documentElement.getAttribute('data-tsx-content-loaded')==='1')"
                 )
             except Exception:
                 ok = False
-            if not ok:
-                _ensure_content_script(context, page, globals().get('_GLOBAL_EXT_PATH'))
+            # Если маркер не найден — продолжаем; расширение подхватится по манифесту
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
             # Дождёмся сетевых запросов и дадим странице стабилизироваться
             try:

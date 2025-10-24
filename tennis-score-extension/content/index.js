@@ -7,6 +7,11 @@
     try { if (typeof document !== 'undefined' && document.documentElement) {
       document.documentElement.setAttribute('data-tsx-content-loaded', '1');
     } } catch(_) {}
+    // Perf mode flags (server-friendly throttling)
+    try {
+      const perf = String(localStorage.getItem('__TSX_PERF')||'').toLowerCase();
+      if (perf === 'server') window.__TSX_SERVER_MODE__ = true;
+    } catch(_) {}
   }
 
 /*
@@ -1016,7 +1021,8 @@ function renderFavOppCompare(payload) {
     render();
     const mo = new MutationObserver(() => { requestAnimationFrame(render); });
     mo.observe(document.documentElement, { childList: true, subtree: true });
-    setInterval(render, 2000);
+    // Drop frequent polling; rely on mutations, with rare safety tick
+    try { setInterval(render, (window.__TSX_SERVER_MODE__? 15000 : 8000)); } catch(_) {}
   };
 
   const install = () => {
@@ -1656,6 +1662,7 @@ function renderFavOppCompare(payload) {
         const mk = (cls, color) => `<span class=\"dot ${cls}\" title=\"${cls==='dot-win'?'win':'loss'}\" style=\"width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px rgba(0,0,0,0.12) inset;margin-right:3px;vertical-align:middle;background:${color};\"></span>`;
         return tokens.map(t => (t === '🟢' ? mk('dot-win', '#22c55e') : mk('dot-loss', '#ef4444'))).join('');
       };
+      if (window.__TSX_SERVER_MODE__) return; // skip heavy H2H reconstruction on server
       let attempts = 0;
       const id = setInterval(() => {
         attempts++;
@@ -1831,6 +1838,7 @@ function renderFavOppCompare(payload) {
         const mk = (cls, color) => `<span class=\"dot ${cls}\" title=\"${cls==='dot-win'?'win':'loss'}\" style=\"width:8px;height:8px;border-radius:50%;display:inline-block;box-shadow:0 0 0 1px rgba(0,0,0,0.12) inset;margin-right:3px;vertical-align:middle;background:${color};\"></span>`;
         return tokens.map(t => (t === '🟢' ? mk('dot-win', '#22c55e') : mk('dot-loss', '#ef4444'))).join('');
       };
+      if (window.__TSX_SERVER_MODE__) return; // skip heavy H2H reconstruction on server
       let attempts = 0;
       const id = setInterval(() => {
         attempts++;
@@ -2067,6 +2075,7 @@ function renderFavOppCompare(payload) {
 
 // --- Ensure inline FCI appears right before <pre id="favImproved"> ---
 function ensureFCIInline() {
+  if (window.__TSX_SERVER_MODE__) return; // server mode: skip extra compute
   try {
     const anchor = document.getElementById('favImproved');
     if (!anchor) return;
@@ -3624,6 +3633,9 @@ function computeStabilityFromPatterns(p) {
   try {
     const mo = new MutationObserver(()=>{ try{ injectOnce(document); }catch(_){ } });
     mo.observe(document.documentElement, { subtree:true, childList:true });
-    setInterval(()=>{ try{ injectOnce(document); }catch(_){ } }, 1200);
+    // Reduce background polling; mutations usually suffice
+    if (!window.__TSX_SERVER_MODE__) {
+      setInterval(()=>{ try{ injectOnce(document); }catch(_){ } }, 5000);
+    }
   } catch(_){ }
 })();
