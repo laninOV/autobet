@@ -1688,7 +1688,8 @@ def run(filters: List[str]) -> None:
 
 def main() -> int:
     args = build_arg_parser().parse_args()
-    filters = args.filters or DEFAULT_FILTERS
+    # Не применяем дефолтный whitelist — по умолчанию берём все лиги
+    filters = args.filters or []
     try:
         run(filters)
         return 0
