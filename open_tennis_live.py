@@ -945,7 +945,8 @@ def _load_known_leagues_from_disk() -> None:
         pass
 
 
-HIDE_PASS = False
+# По умолчанию не отправляем PASS-уведомления
+HIDE_PASS = True
 
 def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
@@ -2521,8 +2522,8 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                         # Всегда отправляем сообщение; строка счёта появится, когда live-счёт станет доступен
                             score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
-                        # Optional filter: skip PASS verdicts
-                        if not (HIDE_PASS and (' | 🔴 PASS |' in msg or msg.strip().endswith('🔴 PASS | Ставка: —'))):
+                        # Всегда скрываем PASS: не отправляем такие сообщения
+                        if '🔴 PASS' not in msg:
                             _upsert_tg_message(url, msg, finished)
                 except Exception:
                     pass
