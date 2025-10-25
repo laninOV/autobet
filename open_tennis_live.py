@@ -1965,7 +1965,41 @@ def collect_filtered_stats_links(page) -> List[str]:
                                     continue
                                 if name in row_text_full:
                                     _LEAGUE_BY_URL[abs_url] = name
+                                    try:
+                                        _LEAGUE_BY_URL[_canonical_stats_url(abs_url)] = name
+                                    except Exception:
+                                        pass
                                     break
+                    except Exception:
+                        pass
+                    # Fallback: derive league phrase from row text heuristically
+                    try:
+                        if abs_url not in _LEAGUE_BY_URL and row_text_full:
+                            hay = str(row_text_full)
+                            # common prefixes
+                            pats = [
+                                r"(Лига\s+Про[^,|;]*)",
+                                r"(Кубок\s+ТТ[^,|;]*)",
+                                r"(TT\s*Cup[^,|;]*)",
+                                r"(Win\s*Cup[^,|;]*)",
+                                r"(Liga\s*Pro[^,|;]*)",
+                                r"(Лига\s+[^,|;]{2,60})",
+                            ]
+                            found = None
+                            for pat in pats:
+                                m = re.search(pat, hay, flags=re.IGNORECASE)
+                                if m:
+                                    val = m.group(1).strip()
+                                    # normalize spacing/case, keep original slice
+                                    if val and all(x not in val for x in ALWAYS_EXCLUDED):
+                                        found = val
+                                        break
+                            if found:
+                                _LEAGUE_BY_URL[abs_url] = found
+                                try:
+                                    _LEAGUE_BY_URL[_canonical_stats_url(abs_url)] = found
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                 except Exception:
@@ -2016,6 +2050,23 @@ def collect_filtered_stats_links(page) -> List[str]:
             row_text_full = a.evaluate(
                 r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim(); }"
             ) or ""
+            # Постараемся прочитать саму ячейку 'Турнир' (если таблица)
+            try:
+                league_cell = a.evaluate(
+                    r"el => {\n"
+                    r"  const table = el.closest('table'); if(!table) return null;\n"
+                    r"  const thead = table.tHead || table.querySelector('thead'); if(!thead) return null;\n"
+                    r"  const headerCells = Array.from(thead.querySelectorAll('th, td'));\n"
+                    r"  const idx = headerCells.findIndex(th => /\bТурнир\b/i.test(th.textContent||''));\n"
+                    r"  if(idx<0) return null;\n"
+                    r"  const row = el.closest('tr'); if(!row) return null;\n"
+                    r"  const cells = row.cells ? Array.from(row.cells) : Array.from(row.querySelectorAll('td'));\n"
+                    r"  const cell = cells[idx] || cells[cells.length-1];\n"
+                    r"  return (cell && (cell.innerText||cell.textContent||'').replace(/\s+/g,' ').trim()) || null;\n"
+                    r"}"
+                )
+            except Exception:
+                league_cell = None
             # Сначала отфильтруем по исключённым турнирам (если заданы глобально)
             try:
                 excluded = [s for s in (globals().get('_EXCLUDED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
@@ -2055,6 +2106,36 @@ def collect_filtered_stats_links(page) -> List[str]:
             seen.add(abs_url)
             hrefs.append(abs_url)
             _dbg('collect', f'+ {abs_url}')
+            # Сохраним лигу по иерархии приоритетов: league_cell -> known leagues in row -> regex heuristics
+            try:
+                league_saved = False
+                if isinstance(league_cell, str) and len(league_cell) >= 3:
+                    val = league_cell.strip()
+                    if val and all(x not in val for x in ALWAYS_EXCLUDED):
+                        _LEAGUE_BY_URL[abs_url] = val
+                        _LEAGUE_BY_URL[_canonical_stats_url(abs_url)] = val
+                        league_saved = True
+                if (not league_saved) and _KNOWN_LEAGUES and row_text_full:
+                    for name in sorted(_KNOWN_LEAGUES, key=len, reverse=True):
+                        if not isinstance(name, str) or not name or (name in ALWAYS_EXCLUDED):
+                            continue
+                        if name in row_text_full:
+                            _LEAGUE_BY_URL[abs_url] = name
+                            _LEAGUE_BY_URL[_canonical_stats_url(abs_url)] = name
+                            league_saved = True
+                            break
+                if not league_saved and row_text_full:
+                    hay = row_text_full
+                    for pat in (r"(Лига\s+Про[^,|;]*)", r"(Кубок\s+ТТ[^,|;]*)", r"(TT\s*Cup[^,|;]*)", r"(Win\s*Cup[^,|;]*)", r"(Liga\s*Pro[^,|;]*)", r"(Лига\s+[^,|;]{2,60})"):
+                        m = re.search(pat, hay, flags=re.IGNORECASE)
+                        if m:
+                            val = m.group(1).strip()
+                            if val and all(x not in val for x in ALWAYS_EXCLUDED):
+                                _LEAGUE_BY_URL[abs_url] = val
+                                _LEAGUE_BY_URL[_canonical_stats_url(abs_url)] = val
+                                break
+            except Exception:
+                pass
             # Try to capture current live score from the same row for this URL
             try:
                 score_info = a.evaluate(
