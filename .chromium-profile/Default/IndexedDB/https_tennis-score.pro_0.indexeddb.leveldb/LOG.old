@@ -1,2 +1,3 @@
-2025/10/24-01:26:16.126 ea91c Creating DB /Users/lanin/Development/autobet/.chromium-profile/Default/IndexedDB/https_tennis-score.pro_0.indexeddb.leveldb since it was missing.
-2025/10/24-01:26:16.129 ea91c Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/IndexedDB/https_tennis-score.pro_0.indexeddb.leveldb/MANIFEST-000001
+2025/10/24-01:27:27.642 eb3c2 Reusing MANIFEST /Users/lanin/Development/autobet/.chromium-profile/Default/IndexedDB/https_tennis-score.pro_0.indexeddb.leveldb/MANIFEST-000001
+2025/10/24-01:27:27.642 eb3c2 Recovering log #3
+2025/10/24-01:27:27.642 eb3c2 Reusing old log /Users/lanin/Development/autobet/.chromium-profile/Default/IndexedDB/https_tennis-score.pro_0.indexeddb.leveldb/000003.log 

@@ -211,6 +211,7 @@ def _dbg(tag: str, msg: str) -> None:
 _TG_TOKEN: Optional[str] = None
 _TG_CHAT_ID: Optional[str] = None
 _TG_MSG_MAP_FILE = os.path.join(os.path.dirname(__file__), ".tg_msg_map.json")
+_TG_CLIENT = None  # late‑init Telegram client
 
 def _load_tg_map():
     try:
@@ -243,6 +244,170 @@ def _save_tg_map():
             json.dump(out, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+class TelegramClient:
+    """Minimal Telegram client with send/edit and URL‑keyed upsert.
+    Persists message ids per URL and last text for idempotent edits.
+    """
+    def __init__(self, token: str, chat_id: str):
+        self.token = str(token)
+        self.chat_id = str(chat_id)
+
+    def _api(self, method: str, payload: Dict[str, str], timeout: int = 10) -> Dict:
+        try:
+            api_base = f"https://api.telegram.org/bot{self.token}/{method}"
+            data = _urlparse.urlencode(payload).encode('utf-8')
+            req = _urlrequest.Request(api_base, data=data)
+            with _urlrequest.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except Exception as e:
+            if os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG'):
+                try:
+                    print(f"[tg] api {method} exception: {e}")
+                except Exception:
+                    pass
+            return { 'ok': False, 'error': str(e) }
+
+    def send_text(self, text: str) -> Optional[int]:
+        # try HTML first
+        payload = {
+            'chat_id': self.chat_id,
+            'text': text,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': 'true',
+        }
+        r = self._api('sendMessage', payload)
+        if r.get('ok') and isinstance(r.get('result'), dict):
+            mid = r['result'].get('message_id')
+            if (os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG')) and isinstance(mid, int):
+                try:
+                    print(f"[tg] send ok mid={mid}")
+                except Exception:
+                    pass
+            return mid if isinstance(mid, int) else None
+        # fallback: plain text without parse_mode (common for HTML entity errors)
+        if os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG'):
+            try:
+                print(f"[tg] send failed, retry plain: {r}")
+            except Exception:
+                pass
+        plain = (text or '')[:3800]
+        r2 = self._api('sendMessage', {
+            'chat_id': self.chat_id,
+            'text': plain,
+            'disable_web_page_preview': 'true',
+        })
+        if r2.get('ok') and isinstance(r2.get('result'), dict):
+            mid = r2['result'].get('message_id')
+            if (os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG')) and isinstance(mid, int):
+                try:
+                    print(f"[tg] send ok (plain) mid={mid}")
+                except Exception:
+                    pass
+            return mid if isinstance(mid, int) else None
+        if os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG'):
+            try:
+                print(f"[tg] send failed (plain): {r2}")
+            except Exception:
+                pass
+        return None
+
+    def edit_text(self, message_id: int, text: str) -> bool:
+        r = self._api('editMessageText', {
+            'chat_id': self.chat_id,
+            'message_id': str(message_id),
+            'text': text,
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': 'true',
+        })
+        ok = bool(r.get('ok'))
+        if not ok:
+            try:
+                desc = (r.get('description') or '') if isinstance(r, dict) else ''
+                if isinstance(desc, str) and 'message is not modified' in desc.lower():
+                    ok = True
+            except Exception:
+                pass
+        # fallback without parse_mode if parse error suspected
+        if not ok:
+            r2 = self._api('editMessageText', {
+                'chat_id': self.chat_id,
+                'message_id': str(message_id),
+                'text': (text or '')[:3800],
+                'disable_web_page_preview': 'true',
+            })
+            if bool(r2.get('ok')):
+                ok = True
+        if os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG'):
+            try:
+                print(f"[tg] edit mid={message_id} ok={ok}")
+            except Exception:
+                pass
+        return ok
+
+    def upsert_by_url(self, url: str, text: str, finished: bool = False) -> Tuple[bool, Optional[int], str]:
+        """Send new or edit existing message for this stats URL.
+        Returns (success, message_id, action) where action in {'send','edit','noop'}.
+        """
+        try:
+            if not (self.token and self.chat_id):
+                if os.getenv('AUTOBET_DEBUG'):
+                    print('[tg] skip: token/chat missing for upsert')
+                return (False, None, 'noop')
+            canon = _canonical_stats_url(url)
+            mid = _TG_MSG_BY_URL.get(url) or _TG_MSG_BY_URL.get(canon)
+            last_text = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
+            # Try edit if we have a message id and text changed
+            if mid and (text and text != last_text):
+                if self.edit_text(mid, text):
+                    _TG_MSG_BY_URL[url] = mid
+                    _TG_MSG_BY_URL[canon] = mid
+                    _LAST_TG_TEXT_BY_URL[url] = text
+                    _LAST_TG_TEXT_BY_URL[canon] = text
+                    _save_tg_map()
+                    # Append finish marker if requested
+                    if finished:
+                        fin_text = text if '🏁' in text else (text + "\n🏁 Игра завершена")
+                        if self.edit_text(mid, fin_text):
+                            _LAST_TG_TEXT_BY_URL[url] = fin_text
+                            _LAST_TG_TEXT_BY_URL[canon] = fin_text
+                            _save_tg_map()
+                            try:
+                                _MATCH_DONE.add(canon)
+                            except Exception:
+                                pass
+                    return (True, mid, 'edit')
+            # Else send new
+            if not mid:
+                new_id = self.send_text(text)
+                if isinstance(new_id, int):
+                    _TG_MSG_BY_URL[url] = new_id
+                    _TG_MSG_BY_URL[canon] = new_id
+                    _LAST_TG_TEXT_BY_URL[url] = text
+                    _LAST_TG_TEXT_BY_URL[canon] = text
+                    _save_tg_map()
+                    # Final mark if needed
+                    if finished and text:
+                        fin_text = text if '🏁' in text else (text + "\n🏁 Игра завершена")
+                        self.edit_text(new_id, fin_text)
+                        _LAST_TG_TEXT_BY_URL[url] = fin_text
+                        _LAST_TG_TEXT_BY_URL[canon] = fin_text
+                        _save_tg_map()
+                        try:
+                            _MATCH_DONE.add(canon)
+                        except Exception:
+                            pass
+                    return (True, new_id, 'send')
+            # No change
+            return (False, mid, 'noop')
+        except Exception as e:
+            if os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG'):
+                try:
+                    print(f"[tg] upsert error for {_canonical_stats_url(url)}: {e}")
+                except Exception:
+                    pass
+            return (False, None, 'noop')
 
 def _load_content_js_from_ext(ext_path: Optional[str]) -> Optional[str]:
     """Load content script JS from the extension folder.
@@ -288,88 +453,34 @@ def _ensure_content_script(context, page, ext_path: Optional[str]) -> bool:
     except Exception:
         return False
 
-def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
-    """Send or edit a Telegram message per match URL.
-    - Sends a new message on first encounter, stores message_id
-    - Edits the message on subsequent updates
-    - On finish flag, appends final marker and stops further edits
+def _upsert_tg_message(url: str, text: str, finished: bool = False) -> bool:
+    """Compatibility wrapper delegating to TelegramClient.upsert_by_url.
+    Returns True on successful send/edit.
     """
     try:
-        if not (_TG_TOKEN and _TG_CHAT_ID):
-            return
-        if url in _MATCH_DONE:
-            return
-        canon = _canonical_stats_url(url)
-        mid = _TG_MSG_BY_URL.get(url) or _TG_MSG_BY_URL.get(canon)
-        # Skip only if we ALREADY have a message id and text hasn't changed
-        if mid:
+        client = globals().get('_TG_CLIENT')
+        if isinstance(client, TelegramClient):
+            ok, mid, action = client.upsert_by_url(url, text, finished)
+            if (os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG')) and ok:
+                try:
+                    print(f"[tg] {action} mid={mid}")
+                except Exception:
+                    pass
+            return bool(ok)
+        else:
+            if os.getenv('AUTOBET_DEBUG'):
+                try:
+                    print("[tg] warn: _TG_CLIENT not initialized")
+                except Exception:
+                    pass
+            return False
+    except Exception as e:
+        if os.getenv('AUTOBET_DEBUG'):
             try:
-                old = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
-                if old and (old == text or (finished and (old == text or old == (text + "\n🏁 Игра завершена")))):
-                    return
+                print(f"[tg] upsert wrapper exception: {e}")
             except Exception:
                 pass
-        _send = globals().get('_tg_send')
-        _edit = globals().get('_tg_edit')
-        if mid:
-            ok = False
-            if callable(_edit):
-                ok = bool(_edit(mid, text))
-                if os.getenv('AUTOBET_DEBUG'):
-                    try:
-                        print(f"[tg] edit mid={mid} ok={ok}")
-                    except Exception:
-                        pass
-            if not ok and callable(_send):
-                new_id = _send(text)
-                if isinstance(new_id, int):
-                    _TG_MSG_BY_URL[url] = new_id
-                    _TG_MSG_BY_URL[canon] = new_id
-                    mid = new_id
-                    _save_tg_map()
-                else:
-                    if os.getenv('AUTOBET_DEBUG'):
-                        try:
-                            print(f"[tg] send after edit failed; no new id for {canon}")
-                        except Exception:
-                            pass
-        else:
-            if callable(_send):
-                new_id = _send(text)
-                if isinstance(new_id, int):
-                    _TG_MSG_BY_URL[url] = new_id
-                    _TG_MSG_BY_URL[canon] = new_id
-                    mid = new_id
-                    _save_tg_map()
-                else:
-                    if os.getenv('AUTOBET_DEBUG'):
-                        try:
-                            print(f"[tg] send failed, no id for {canon}")
-                        except Exception:
-                            pass
-        # persist last text
-        if mid and isinstance(text, str):
-            _LAST_TG_TEXT_BY_URL[url] = text
-            _LAST_TG_TEXT_BY_URL[canon] = text
-            _save_tg_map()
-        if finished and mid:
-            # Add final marker once
-            final_text = text
-            if '🏁' not in text:
-                final_text = text + "\n🏁 Игра завершена"
-            if callable(_edit):
-                _edit(mid, final_text)
-                if os.getenv('AUTOBET_DEBUG'):
-                    try:
-                        print(f"[tg] final edit mid={mid}")
-                    except Exception:
-                        pass
-                _LAST_TG_TEXT_BY_URL[url] = final_text
-                _LAST_TG_TEXT_BY_URL[canon] = final_text
-                _save_tg_map()
-            _MATCH_DONE.add(url)
-    except Exception:
-        pass
+        return False
 
 def _inject_or_replace_score(text: str, score: str) -> str:
     try:
@@ -1086,54 +1197,17 @@ def run(filters: List[str]) -> None:
                         pass
                 if token and chat_id:
                     # Initialize Telegram API helpers
-                    global _TG_TOKEN, _TG_CHAT_ID
+                    global _TG_TOKEN, _TG_CHAT_ID, _TG_CLIENT
                     _TG_TOKEN, _TG_CHAT_ID = token, str(chat_id)
+                    _TG_CLIENT = TelegramClient(_TG_TOKEN, _TG_CHAT_ID)
 
+                    # Backward compatible wrappers
                     def _tg_send(text: str) -> Optional[int]:
-                        try:
-                            api_base = f"https://api.telegram.org/bot{_TG_TOKEN}/sendMessage"
-                            data = _urlparse.urlencode({
-                                'chat_id': _TG_CHAT_ID,
-                                'text': text,
-                                'parse_mode': 'HTML',
-                                'disable_web_page_preview': 'true'
-                            }).encode('utf-8')
-                            req = _urlrequest.Request(api_base, data=data)
-                            with _urlrequest.urlopen(req, timeout=10) as resp:
-                                r = json.loads(resp.read().decode('utf-8'))
-                            if r.get('ok') and isinstance(r.get('result'), dict):
-                                return r['result'].get('message_id')
-                        except Exception:
-                            pass
-                        return None
+                        return _TG_CLIENT.send_text(text)
 
                     def _tg_edit(message_id: int, text: str) -> bool:
-                        try:
-                            api_base = f"https://api.telegram.org/bot{_TG_TOKEN}/editMessageText"
-                            data = _urlparse.urlencode({
-                                'chat_id': _TG_CHAT_ID,
-                                'message_id': str(message_id),
-                                'text': text,
-                                'parse_mode': 'HTML',
-                                'disable_web_page_preview': 'true'
-                            }).encode('utf-8')
-                            req = _urlrequest.Request(api_base, data=data)
-                            with _urlrequest.urlopen(req, timeout=10) as resp:
-                                r = json.loads(resp.read().decode('utf-8'))
-                            if bool(r.get('ok')):
-                                return True
-                            # Treat 'message is not modified' as success to avoid duplicates
-                            try:
-                                desc = (r.get('description') or '') if isinstance(r, dict) else ''
-                                if isinstance(desc, str) and 'message is not modified' in desc.lower():
-                                    return True
-                            except Exception:
-                                pass
-                            return False
-                        except Exception:
-                            return False
+                        return _TG_CLIENT.edit_text(message_id, text)
 
-                    # expose for later
                     globals()['_tg_send'] = _tg_send
                     globals()['_tg_edit'] = _tg_edit
 
@@ -1149,7 +1223,7 @@ def run(filters: List[str]) -> None:
                     # Startup ping so user sees bot is alive
                     try:
                         ts = datetime.now().isoformat(timespec="seconds")
-                        _tg_send(f"✅ Autobet started {ts}. Chat: {chat_id}")
+                        _TG_CLIENT.send_text(f"✅ Autobet started {ts}. Chat: {chat_id}")
                     except Exception as e:
                         try:
                             print(f"[tg] warn: cannot send startup ping: {e}")
@@ -1321,7 +1395,9 @@ def run(filters: List[str]) -> None:
             # Передаём списки в localStorage — их подхватит content script расширения
             try:
                 excl_loc = (getattr(args,'exclude',None) or []) + ALWAYS_EXCLUDED
-                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, excl_loc)
+                # ВАЖНО: когда filters пустой, считаем это «разрешить все», поэтому кладём []
+                allow_loc = list(filters or [])
+                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", allow_loc, excl_loc)
             except Exception:
                 pass
             try:
@@ -1340,8 +1416,8 @@ def run(filters: List[str]) -> None:
             except Exception:
                 unsafe0 = False
             if unsafe0:
-                _apply_filter_to_all_frames(page, filters or DEFAULT_FILTERS, excl)
-            _dbg('filter', f"applied with allowed={len(filters or [])} excluded={(len(excl or []))}")
+                _apply_filter_to_all_frames(page, list(filters or []), excl)
+            _dbg('filter', f"applied with allowed={len(list(filters or []))} excluded={(len(excl or []))}")
             try:
                 page.evaluate("console.info('AUTO:filter applied')")
             except Exception:
@@ -2564,6 +2640,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
     diag_supp_pass = 0
     diag_supp_risk = 0
     diag_supp_league = 0
+    diag_err = 0
     for url in links:
         if stop_event is not None and stop_event.is_set():
             print("[stop] Прервано пользователем (Enter)")
@@ -2578,8 +2655,13 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 page = context.pages[0]
                 try:
                     page.bring_to_front()
-                except Exception:
-                    pass
+                except Exception as e:
+                    diag_err += 1
+                    if os.getenv('AUTOBET_DEBUG'):
+                        try:
+                            print(f"[tg] error building/sending: {e}")
+                        except Exception:
+                            pass
             else:
                 page = context.new_page()
             # На вкладках /stats проверяем маркер скрипта (без принудительной инъекции)
@@ -2649,7 +2731,13 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                 save_match_row(url, fav, opp, metrics, output_csv)
                 # Telegram notify if configured (new formatted message using compare block if available)
                 try:
-                    if _TG_SENDER:
+                    # Отправляем, если Telegram сконфигурирован (token+chat)
+                    if (_TG_TOKEN and _TG_CHAT_ID):
+                        if os.getenv('AUTOBET_DEBUG'):
+                            try:
+                                print(f"[tg] attempt send: {url}")
+                            except Exception:
+                                pass
                         compare = _extract_compare_block(page)
                         # Live score: prefer captured from live list by URL; fallback to stats page extraction
                         live_score = None
@@ -2715,8 +2803,16 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                             # при ошибке проверки всё равно продолжаем — безопасная ветка ниже отфильтрует PASS/RISK
                             pass
                         # Всегда отправляем сообщение; строка счёта появится, когда live-счёт станет доступен
-                            score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
-                        msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
+                        score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
+                        try:
+                            msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
+                        except Exception as e:
+                            if os.getenv('AUTOBET_DEBUG'):
+                                try:
+                                    print(f"[tg] compose error: {e}")
+                                except Exception:
+                                    pass
+                            msg = f"{fav} vs {opp}\n{_canonical_stats_url(url)}"
                         # Логика отправки: всегда скрываем PASS; RISK скрываем, только если включён флаг SKIP_RISK
                         if '🔴 PASS' in msg:
                             try:
@@ -2731,8 +2827,34 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                                 pass
                             diag_supp_risk += 1
                         else:
-                            _upsert_tg_message(url, msg, finished)
-                            diag_sent += 1
+                            # Unified upsert via TelegramClient
+                            sent_ok = False
+                            try:
+                                if os.getenv('AUTOBET_DEBUG'):
+                                    try:
+                                        print(f"[tg] upsert for {_canonical_stats_url(url)}")
+                                    except Exception:
+                                        pass
+                                client = globals().get('_TG_CLIENT')
+                                if isinstance(client, TelegramClient):
+                                    ok, mid, action = client.upsert_by_url(url, msg, finished)
+                                    sent_ok = bool(ok)
+                                    if (os.getenv('AUTOBET_DEBUG') or os.getenv('AUTOBET_DIAG')) and ok:
+                                        try:
+                                            print(f"[tg] {action} mid={mid} for {_canonical_stats_url(url)}")
+                                        except Exception:
+                                            pass
+                                else:
+                                    # Backward compatibility wrapper
+                                    sent_ok = _upsert_tg_message(url, msg, finished)
+                            except Exception as e:
+                                if os.getenv('AUTOBET_DEBUG'):
+                                    try:
+                                        print(f"[tg] upsert exception: {e}")
+                                    except Exception:
+                                        pass
+                            if sent_ok:
+                                diag_sent += 1
                 except Exception:
                     pass
                 # помечаем как обработанный только при успешном сохранении
@@ -2773,7 +2895,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
     # Optional concise diagnostics
     try:
         if os.getenv('AUTOBET_DIAG') not in (None, '', '0', 'false', 'False'):
-            print(f"[diag] sent={diag_sent} suppressed: pass={diag_supp_pass}, risk={diag_supp_risk}, league={diag_supp_league}")
+            print(f"[diag] sent={diag_sent} suppressed: pass={diag_supp_pass}, risk={diag_supp_risk}, league={diag_supp_league}, errors={diag_err}")
     except Exception:
         pass
 
@@ -2825,6 +2947,10 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
     - indexP3_fav
     Returns tuple of floats (percent values) or None if unavailable.
     """
+    # Preserve lightweight metrics found early to merge later
+    mx_log3: Optional[float] = None
+    mx_idx3: Optional[float] = None
+
     # 1a) Try reading directly from the injected min2-extract dataset
     try:
         v = page.evaluate(
@@ -2840,11 +2966,8 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
                     return float(str(x).replace(',', '.')) if str(x) else None
                 except Exception:
                     return None
-            log3 = _f(v.get('log3'))
-            idx3 = _f(v.get('idx3'))
-            # NB values не выводятся в блоке — оставляем None
-            if log3 is not None or idx3 is not None:
-                return (None, None, log3, idx3)
+            mx_log3 = _f(v.get('log3'))
+            mx_idx3 = _f(v.get('idx3'))
     except Exception:
         pass
 
@@ -2887,8 +3010,8 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
                 return (
                     as_float(nb_noh2h_3),
                     as_float(nb_h2h_3),
-                    as_float(log3),
-                    as_float(idx_p3),
+                    (as_float(log3) or mx_log3),
+                    (as_float(idx_p3) or mx_idx3),
                 )
         except Exception:
             pass
@@ -2961,7 +3084,7 @@ def _extract_metrics_for_csv(page, fav: str, opp: str) -> Tuple[Optional[float],
     except Exception:
         pass
 
-    return nb_noh2h_3, nb_h2h_3, log3, idx_p3
+    return nb_noh2h_3, nb_h2h_3, (log3 or mx_log3), (idx_p3 or mx_idx3)
 
 
 def _extract_current_score(page) -> Optional[str]:
