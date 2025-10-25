@@ -296,6 +296,13 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
             return
         canon = _canonical_stats_url(url)
         mid = _TG_MSG_BY_URL.get(url) or _TG_MSG_BY_URL.get(canon)
+        # If nothing changed since last time, skip early to avoid duplicates
+        try:
+            old = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
+            if old and (old == text or (finished and (old == text or old == (text + "\n🏁 Игра завершена")))):
+                return
+        except Exception:
+            pass
         _send = globals().get('_tg_send')
         _edit = globals().get('_tg_edit')
         if mid:
@@ -1098,7 +1105,16 @@ def run(filters: List[str]) -> None:
                             req = _urlrequest.Request(api_base, data=data)
                             with _urlrequest.urlopen(req, timeout=10) as resp:
                                 r = json.loads(resp.read().decode('utf-8'))
-                            return bool(r.get('ok'))
+                            if bool(r.get('ok')):
+                                return True
+                            # Treat 'message is not modified' as success to avoid duplicates
+                            try:
+                                desc = (r.get('description') or '') if isinstance(r, dict) else ''
+                                if isinstance(desc, str) and 'message is not modified' in desc.lower():
+                                    return True
+                            except Exception:
+                                pass
+                            return False
                         except Exception:
                             return False
 
@@ -2606,6 +2622,11 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                         # Всегда скрываем PASS и RISK: не отправляем такие сообщения
                         if ('🔴 PASS' not in msg) and ('🟡 RISK' not in msg):
                             _upsert_tg_message(url, msg, finished)
+                        else:
+                            try:
+                                print(f"[tg] suppressed (PASS/RISK): {url}")
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 # помечаем как обработанный только при успешном сохранении
