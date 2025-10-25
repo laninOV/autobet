@@ -959,6 +959,8 @@ def _load_known_leagues_from_disk() -> None:
 
 # По умолчанию не отправляем PASS-уведомления
 HIDE_PASS = True
+# По умолчанию RISK отправляем; можно отключить флагом/ENV
+SKIP_RISK = False
 
 def run(filters: List[str]) -> None:
     from playwright.sync_api import sync_playwright
@@ -1032,6 +1034,12 @@ def run(filters: List[str]) -> None:
         try:
             global HIDE_PASS
             HIDE_PASS = bool(getattr(args, 'hide_pass', False) or (os.getenv('AUTOBET_HIDE_PASS') not in (None, '', '0', 'false', 'False')))
+        except Exception:
+            pass
+        # Skip RISK option (по умолчанию выключено)
+        try:
+            global SKIP_RISK
+            SKIP_RISK = bool(getattr(args, 'skip_risk', False) or (os.getenv('AUTOBET_SKIP_RISK') not in (None, '', '0', 'false', 'False')))
         except Exception:
             pass
 
@@ -1525,7 +1533,7 @@ def run(filters: List[str]) -> None:
         try:
             bg_minutes = getattr(args, 'bg_minutes', None)
             interval_sec = getattr(args, 'bg_interval', None)
-            score_interval_sec = getattr(args, 'score_interval', 20)
+            score_interval_sec = getattr(args, 'score_interval', 30)
         except Exception:
             bg_minutes, interval_sec, score_interval_sec = None, None, 20
 
@@ -1681,8 +1689,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fonbet-password", dest="fonbet_password", help="Пароль для fon.bet (или FONBET_PASSWORD)")
     parser.add_argument("--bg-minutes", dest="bg_minutes", type=int, default=30, help="Сколько минут сканировать в фоне (по умолчанию 30)")
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
-    parser.add_argument("--score-interval", dest="score_interval", type=int, default=20,
-                        help="Как часто обновлять счёт между сканами, сек (по умолчанию 20)")
+    parser.add_argument("--score-interval", dest="score_interval", type=int, default=30,
+                        help="Как часто обновлять счёт между сканами, сек (по умолчанию 30)")
     parser.add_argument("--processed-ttl", dest="processed_ttl", type=int, default=0,
                         help="Через сколько минут повторно открывать уже обработанные ссылки (0 = никогда в этом запуске)")
     parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
@@ -1711,6 +1719,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Фильтр по вердикту: скрывать PASS из уведомлений
     parser.add_argument("--hide-pass", dest="hide_pass", action="store_true",
                         help="Не отправлять уведомления для матчей с вердиктом 🔴 PASS")
+    parser.add_argument("--skip-risk", dest="skip_risk", action="store_true",
+                        help="Не отправлять уведомления для матчей с вердиктом 🟡 RISK (по умолчанию RISK отправляются)")
     return parser
 
 
@@ -1966,6 +1976,25 @@ def collect_filtered_stats_links(page) -> List[str]:
                         row_text_full = ''
                     if not isinstance(href, str):
                         continue
+                    # Fast path: drop excluded leagues and enforce whitelist using row text
+                    try:
+                        ex = [s for s in (globals().get('_EXCLUDED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
+                    except Exception:
+                        ex = []
+                    ex = (ex or []) + ALWAYS_EXCLUDED
+                    try:
+                        allow = [s for s in (globals().get('_ALLOWED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
+                    except Exception:
+                        allow = []
+                    try:
+                        low = (row_text_full or '').lower()
+                        if ex and any(t.lower() in low for t in ex):
+                            # skip excluded (e.g., Setka Cup)
+                            continue
+                        if allow and not any(t.lower() in low for t in allow):
+                            continue
+                    except Exception:
+                        pass
                     abs_url = urljoin(base, href)
                     if abs_url in seen:
                         continue
@@ -2485,6 +2514,11 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
     skipped_processed = 0
     visited = 0
     saved = 0
+    # Diagnostics counters for visibility
+    diag_sent = 0
+    diag_supp_pass = 0
+    diag_supp_risk = 0
+    diag_supp_league = 0
     for url in links:
         if stop_event is not None and stop_event.is_set():
             print("[stop] Прервано пользователем (Enter)")
@@ -2630,6 +2664,7 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                         try:
                             if league and any(t.lower() in league.lower() for t in tokens):
                                 print(f"[tg] suppressed (excluded league): {league}")
+                                diag_supp_league += 1
                                 raise RuntimeError('skip_send_excluded_league')
                         except Exception:
                             # при ошибке проверки всё равно продолжаем — безопасная ветка ниже отфильтрует PASS/RISK
@@ -2637,14 +2672,22 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                         # Всегда отправляем сообщение; строка счёта появится, когда live-счёт станет доступен
                             score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
-                        # Всегда скрываем PASS и RISK: не отправляем такие сообщения
-                        if ('🔴 PASS' not in msg) and ('🟡 RISK' not in msg):
-                            _upsert_tg_message(url, msg, finished)
-                        else:
+                        # Логика отправки: всегда скрываем PASS; RISK скрываем, только если включён флаг SKIP_RISK
+                        if '🔴 PASS' in msg:
                             try:
-                                print(f"[tg] suppressed (PASS/RISK): {url}")
+                                print(f"[tg] suppressed (PASS): {url}")
                             except Exception:
                                 pass
+                            diag_supp_pass += 1
+                        elif globals().get('SKIP_RISK', False) and ('🟡 RISK' in msg):
+                            try:
+                                print(f"[tg] suppressed (RISK): {url}")
+                            except Exception:
+                                pass
+                            diag_supp_risk += 1
+                        else:
+                            _upsert_tg_message(url, msg, finished)
+                            diag_sent += 1
                 except Exception:
                     pass
                 # помечаем как обработанный только при успешном сохранении
@@ -2682,6 +2725,12 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
             visited += 1
     save_processed_urls(processed, processed_path)
     print(f"Итог: собрано ссылок={len(links)}, открыто={visited}, сохранено={saved}, пропущено как processed={skipped_processed}")
+    # Optional concise diagnostics
+    try:
+        if os.getenv('AUTOBET_DIAG') not in (None, '', '0', 'false', 'False'):
+            print(f"[diag] sent={diag_sent} suppressed: pass={diag_supp_pass}, risk={diag_supp_risk}, league={diag_supp_league}")
+    except Exception:
+        pass
 
 
 def parse_players_from_stats_url(url: str) -> Tuple[Optional[str], Optional[str]]:
