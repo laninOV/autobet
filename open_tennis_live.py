@@ -91,6 +91,7 @@ ALLOW_NOTIFY_ALL = True
 _KNOWN_LEAGUES: List[str] = []
 _LEAGUE_BY_URL: Dict[str, str] = {}
 _ALLOWED_TOURNAMENTS: List[str] = []
+_EXCLUDED_TOURNAMENTS: List[str] = []
 _LIVE_SCORE_BY_URL: Dict[str, str] = {}
 _LIVE_FINISHED_BY_URL: Dict[str, bool] = {}
 _TG_MSG_BY_URL: Dict[str, int] = {}
@@ -109,6 +110,82 @@ SAFE_MODE = True  # по умолчанию бережный режим: без 
 _PAUSED = False  # Пауза фонового сканирования/навигации
 _LAST_LIVE_LINKS: List[str] = []  # последние собранные ссылки со страницы live
 _LIVE_LAST_SEEN: Dict[str, float] = {}  # mono time when link last seen on live
+
+def _gc_runtime_caches(max_entries: int = 2000,
+                       seen_ttl_sec: int = 3600,
+                       finished_ttl_sec: int = 1800) -> None:
+    """Bound memory of long‑living caches.
+    - Drop per‑URL caches if link hasn't been seen on live for seen_ttl_sec
+    - For Telegram maps, drop entries if match finished and last seen older than finished_ttl_sec
+    - Cap dict sizes to max_entries by evicting oldest by last seen
+    """
+    # Allow tuning via env
+    try:
+        v = os.getenv('AUTOBET_CACHE_MAX')
+        if v not in (None, ''):
+            max_entries = max(100, int(v))
+    except Exception:
+        pass
+    try:
+        v = os.getenv('AUTOBET_SEEN_TTL_SEC')
+        if v not in (None, ''):
+            seen_ttl_sec = max(300, int(v))
+    except Exception:
+        pass
+    try:
+        v = os.getenv('AUTOBET_FINISHED_TTL_SEC')
+        if v not in (None, ''):
+            finished_ttl_sec = max(120, int(v))
+    except Exception:
+        pass
+    now = time.monotonic()
+    ls = dict(_LIVE_LAST_SEEN)
+    # 1) Evict by TTL
+    stale = set()
+    for k, t in ls.items():
+        try:
+            if (now - float(t)) > max(300, int(seen_ttl_sec)):
+                stale.add(k)
+        except Exception:
+            stale.add(k)
+    # 2) If too many, evict oldest beyond limit
+    try:
+        if len(ls) > max_entries:
+            extra = len(ls) - max_entries
+            oldest = sorted(ls.items(), key=lambda it: (it[1] or 0))[:max(0, extra)]
+            stale.update(k for k, _ in oldest)
+    except Exception:
+        pass
+    if stale:
+        def _drop(d: Dict):
+            try:
+                for k in list(d.keys()):
+                    if k in stale or _canonical_stats_url(k) in stale:
+                        d.pop(k, None)
+            except Exception:
+                pass
+        _drop(_LIVE_SCORE_BY_URL)
+        _drop(_LIVE_SETS_BY_URL)
+        _drop(_LIVE_FINISHED_BY_URL)
+        _drop(_LIVE_FAV_IS_LEFT_BY_URL)
+        _drop(_LIVE_LR_BY_URL)
+        _drop(_STAKE_IS_FAV_BY_URL)
+        _drop(_LEAGUE_BY_URL)
+        for k in stale:
+            _LIVE_LAST_SEEN.pop(k, None)
+    # 3) Telegram maps: prune finished/old
+    try:
+        for k in list(_TG_MSG_BY_URL.keys()):
+            canon = _canonical_stats_url(k)
+            fin = bool(_LIVE_FINISHED_BY_URL.get(canon) or _LIVE_FINISHED_BY_URL.get(k) or (canon in _MATCH_DONE))
+            last = _LIVE_LAST_SEEN.get(canon) or _LIVE_LAST_SEEN.get(k)
+            if fin and (last is None or (now - float(last)) > max(300, int(finished_ttl_sec))):
+                _TG_MSG_BY_URL.pop(k, None)
+                _LAST_TG_TEXT_BY_URL.pop(k, None)
+                _TG_MSG_BY_URL.pop(canon, None)
+                _LAST_TG_TEXT_BY_URL.pop(canon, None)
+    except Exception:
+        pass
 
 # Debug helper
 def _is_debug() -> bool:
@@ -572,6 +649,14 @@ FILTER_JS = r"""
   const ALLOWED = new Set(%(allowed)s);
   const EXCLUDED = new Set(%(excluded)s);
 
+  // Precompute lowercase tokens for robust matching
+  const ALLOWED_TOKENS = Array.from(ALLOWED)
+    .map(s => (s==null? '' : String(s)).toLowerCase())
+    .filter(Boolean);
+  const EXCLUDED_TOKENS = Array.from(EXCLUDED)
+    .map(s => (s==null? '' : String(s)).toLowerCase())
+    .filter(Boolean);
+
   const styleId = '__auto_filter_style__';
   if (!document.getElementById(styleId)) {
     const s = document.createElement('style');
@@ -619,8 +704,9 @@ FILTER_JS = r"""
         if (!cells.length) return;
         const cell = cells[idx] || cells[cells.length - 1];
         const txt = (cell && cell.textContent) ? cell.textContent.trim() : tr.textContent.trim();
-        const blocked = Array.from(EXCLUDED).some(s => txt.includes(s));
-        const allowed = (ALLOWED.size ? Array.from(ALLOWED).some(s => txt.includes(s)) : true);
+        const t = (txt || '').toLowerCase();
+        const blocked = EXCLUDED_TOKENS.some(s => t.includes(s));
+        const allowed = (ALLOWED_TOKENS.length ? ALLOWED_TOKENS.some(s => t.includes(s)) : true);
         const show = allowed && !blocked;
         tr.classList.toggle('__auto-filter-hidden__', !show);
       });
@@ -635,8 +721,9 @@ FILTER_JS = r"""
     candidates.forEach(el => {
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!text) return;
-      const blocked = Array.from(EXCLUDED).some(s => text.includes(s));
-      const allowed = (ALLOWED.size ? Array.from(ALLOWED).some(s => text.includes(s)) : true);
+      const t = text.toLowerCase();
+      const blocked = EXCLUDED_TOKENS.some(s => t.includes(s));
+      const allowed = (ALLOWED_TOKENS.length ? ALLOWED_TOKENS.some(s => t.includes(s)) : true);
       const show = allowed && !blocked;
       el.classList.toggle('__auto-filter-hidden__', !show);
     });
@@ -678,6 +765,12 @@ FILTER_JS_LIGHT = r"""
   window.__AUTO_FILTER_ACTIVE_LIGHT__ = true;
   const ALLOWED = new Set(%(allowed)s);
   const EXCLUDED = new Set(%(excluded)s);
+  const ALLOWED_TOKENS = Array.from(ALLOWED)
+    .map(s => (s==null? '' : String(s)).toLowerCase())
+    .filter(Boolean);
+  const EXCLUDED_TOKENS = Array.from(EXCLUDED)
+    .map(s => (s==null? '' : String(s)).toLowerCase())
+    .filter(Boolean);
   const styleId = '__auto_filter_style__';
   if (!document.getElementById(styleId)) {
     const s = document.createElement('style');
@@ -701,8 +794,9 @@ FILTER_JS_LIGHT = r"""
         const cells = tr.cells ? Array.from(tr.cells): Array.from(tr.querySelectorAll('td'));
         if(!cells.length) continue; const cell = cells[idx] || cells[cells.length-1];
         const txt = (cell && cell.textContent)? (cell.textContent).trim(): (tr.textContent||'').trim();
-        const blocked = Array.from(EXCLUDED).some(s => txt.includes(s));
-        const allowed = (ALLOWED.size? Array.from(ALLOWED).some(s => txt.includes(s)) : true);
+        const t = (txt||'').toLowerCase();
+        const blocked = EXCLUDED_TOKENS.some(s => t.includes(s));
+        const allowed = (ALLOWED_TOKENS.length? ALLOWED_TOKENS.some(s => t.includes(s)) : true);
         tr.classList.toggle('__auto-filter-hidden__', !(allowed && !blocked));
       }
     }
@@ -1190,7 +1284,7 @@ def run(filters: List[str]) -> None:
                 page.wait_for_timeout(pre_collect_ms)
         except Exception:
             pass
-        # Сразу применим визуальную фильтрацию по лигам на live-странице (только основной документ)
+        # Сразу передадим фильтры в localStorage; инъекцию JS-фильтра встраиваем ТОЛЬКО в небезопасном режиме
         try:
             # Передаём списки в localStorage — их подхватит content script расширения
             try:
@@ -1207,9 +1301,14 @@ def run(filters: List[str]) -> None:
                 if ex_env:
                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
             excl = (excl or []) + ALWAYS_EXCLUDED
-            allowed_js = json.dumps(filters or DEFAULT_FILTERS, ensure_ascii=False)
-            excluded_js = json.dumps(excl or [], ensure_ascii=False)
-            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+            # В SAFE-режиме (по умолчанию) избегаем тяжёлой инъекции фильтра
+            unsafe0 = False
+            try:
+                unsafe0 = bool(getattr(args, 'unsafe', False) or (os.getenv('AUTOBET_UNSAFE') not in (None, '', '0', 'false', 'False')))
+            except Exception:
+                unsafe0 = False
+            if unsafe0:
+                _apply_filter_to_all_frames(page, filters or DEFAULT_FILTERS, excl)
             _dbg('filter', f"applied with allowed={len(filters or [])} excluded={(len(excl or []))}")
             try:
                 page.evaluate("console.info('AUTO:filter applied')")
@@ -1270,6 +1369,12 @@ def run(filters: List[str]) -> None:
             if ex_env:
                 excluded = [s.strip() for s in ex_env.split(',') if s.strip()]
         excluded = (excluded or []) + ALWAYS_EXCLUDED
+        try:
+            # Обновим глобальный список исключённых турниров для сборщика ссылок
+            global _EXCLUDED_TOURNAMENTS
+            _EXCLUDED_TOURNAMENTS = [s for s in (excluded or []) if isinstance(s, str) and s.strip()]
+        except Exception:
+            pass
         excluded_js = json.dumps(excluded, ensure_ascii=False)
         # В SAFE-режиме не добавляем тяжёлые скрипты фильтра вообще — фильтрация будет на стороне парсера
         try:
@@ -1278,12 +1383,13 @@ def run(filters: List[str]) -> None:
             unsafe = False
         globals()['SAFE_MODE'] = (not unsafe)
         if not globals()['SAFE_MODE']:
-            # Только когда явно выключили SAFE, добавляем фильтрацию на страницу
+            # Только когда явно выключили SAFE, добавляем фильтрацию на страницу (во всех фреймах)
             try:
                 light = bool(os.getenv('AUTOBET_LIGHT') not in (None, '', '0', 'false', 'False') or getattr(args, 'light', False))
             except Exception:
                 light = False
-            page.evaluate((FILTER_JS_LIGHT if light else FILTER_JS) % {"allowed": allowed_js, "excluded": excluded_js})
+            # Используем общий вспомогательный метод, чтобы покрыть все фреймы
+            _apply_filter_to_all_frames(page, json.loads(allowed_js), json.loads(excluded_js))
         # Обновим список лиг с текущей страницы
         try:
             _update_known_leagues_from_page(page)
@@ -1456,12 +1562,28 @@ def run(filters: List[str]) -> None:
                                 if ex_env:
                                     excl = [s.strip() for s in ex_env.split(',') if s.strip()]
                             excluded_js = json.dumps(excl or [], ensure_ascii=False)
-                            page.evaluate(FILTER_JS % {"allowed": allowed_js, "excluded": excluded_js})
+                            # В небезопасном режиме инжектируем фильтр; иначе только в localStorage
+                            try:
+                                unsafe_r = bool(getattr(args, 'unsafe', False) or (os.getenv('AUTOBET_UNSAFE') not in (None, '', '0', 'false', 'False')))
+                            except Exception:
+                                unsafe_r = False
+                            if unsafe_r:
+                                _apply_filter_to_all_frames(page, json.loads(allowed_js), json.loads(excluded_js))
+                            else:
+                                try:
+                                    page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", json.loads(allowed_js), json.loads(excluded_js))
+                                except Exception:
+                                    pass
                         except Exception as e:
                             print(f"[bg] warn: reload failed: {e}")
                     restart_scan(context, page, filters, stop_event)
                 except Exception as e:
                     print(f"[bg] ошибка цикла: {e}")
+                # Периодический GC кэшей после каждого полного скана
+                try:
+                    _gc_runtime_caches()
+                except Exception:
+                    pass
                 # Спим мелкими шагами, чтобы Ctrl+C отзывался быстрее
                 slept = 0.0
                 # Более частые проверки для мгновенной остановки по Enter
@@ -1893,6 +2015,16 @@ def collect_filtered_stats_links(page) -> List[str]:
             row_text_full = a.evaluate(
                 r"el => { const r = el.closest('tr') || el.closest('[role=\"row\"]') || el.closest('.row') || el.closest('li') || el.closest('.match') || el; return (r.innerText||r.textContent||'').replace(/\s+/g,' ').trim(); }"
             ) or ""
+            # Сначала отфильтруем по исключённым турнирам (если заданы глобально)
+            try:
+                excluded = [s for s in (globals().get('_EXCLUDED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
+            except Exception:
+                excluded = []
+            if excluded:
+                low = row_text_full.lower()
+                if any(s.lower() in low for s in excluded):
+                    _dbg('collect', f'skip by excluded tournament #{i}')
+                    continue
             # Дополнительный жёсткий фильтр по турнирам (если задан список)
             try:
                 allowed = [s for s in (globals().get('_ALLOWED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
@@ -2017,6 +2149,23 @@ def collect_filtered_stats_links(page) -> List[str]:
 
 
 def expand_live_list(page, max_scrolls: int = 20, pause_ms: int = 300) -> None:
+    # Allow tuning via env to limit DOM growth (reduces Chromium RAM)
+    try:
+        v = os.getenv('AUTOBET_SCROLLS')
+        if v not in (None, '', '0'):
+            n = int(v)
+            if n >= 0:
+                max_scrolls = n
+    except Exception:
+        pass
+    try:
+        v = os.getenv('AUTOBET_SCROLL_PAUSE_MS')
+        if v not in (None, ''):
+            n = int(v)
+            if n >= 0:
+                pause_ms = n
+    except Exception:
+        pass
     """Прокручивает страницу/контейнер вниз, чтобы подгрузить виртуализованные строки.
     Также пытается нажимать кнопки "Показать ещё/ещё/More"."""
     try:
@@ -3812,6 +3961,10 @@ def restart_scan(context, page, filters: Optional[List[str]] = None, stop_event:
                 except Exception:
                     pass
     finally:
+        try:
+            _gc_runtime_caches()
+        except Exception:
+            pass
         try:
             _SCAN_LOCK.release()
         except Exception:
