@@ -75,8 +75,13 @@ DEFAULT_FILTERS = [
     "Кубок ТТ",   # матчит: "Кубок ТТ. Польша", "Кубок ТТ. Чехия" и др.
 ]
 
-# Лиги, которые нужно исключать всегда (в UI и при сборе ссылок)
-ALWAYS_EXCLUDED = ["Сетка Кап"]
+# Лиги, которые нужно исключать всегда (в UI, при сборе ссылок и при отправке)
+# Добавлены русское и английское написания Setka Cup
+ALWAYS_EXCLUDED = [
+    "Сетка Кап",
+    "Setka Cup",
+    "TT Setka Cup",
+]
 
 # Глобальный флаг, чтобы не запускать параллельные пересканы
 _SCAN_LOCK = threading.Lock()
@@ -2613,9 +2618,22 @@ def scan_and_save_stats(context, links: List[str], output_csv: str, processed_pa
                         # Fallback: use league captured on live list for this URL
                         if not league:
                             try:
-                                league = _LEAGUE_BY_URL.get(url)
+                                league = _LEAGUE_BY_URL.get(url) or _LEAGUE_BY_URL.get(_canonical_stats_url(url))
                             except Exception:
                                 pass
+                        # Если лига исключена (например, Setka Cup) — не отправляем
+                        try:
+                            tokens = [s for s in (globals().get('_EXCLUDED_TOURNAMENTS') or []) if isinstance(s, str) and s.strip()]
+                        except Exception:
+                            tokens = []
+                        tokens = (tokens or []) + ALWAYS_EXCLUDED
+                        try:
+                            if league and any(t.lower() in league.lower() for t in tokens):
+                                print(f"[tg] suppressed (excluded league): {league}")
+                                raise RuntimeError('skip_send_excluded_league')
+                        except Exception:
+                            # при ошибке проверки всё равно продолжаем — безопасная ветка ниже отфильтрует PASS/RISK
+                            pass
                         # Всегда отправляем сообщение; строка счёта появится, когда live-счёт станет доступен
                             score_line = _compose_score_with_sets(_canonical_stats_url(url), live_score)
                         msg = _format_tg_message_new(fav, opp, url, compare, metrics, score_line, league=league)
