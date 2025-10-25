@@ -1638,11 +1638,20 @@ def run(filters: List[str]) -> None:
             recycle_minutes = int(getattr(args, 'recycle_minutes', 0) or 0)
         except Exception:
             recycle_minutes = 0
+        try:
+            restart_minutes = int(getattr(args, 'restart_browser_minutes', 0) or 0)
+        except Exception:
+            restart_minutes = 0
         print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек; обновление счёта каждые {score_interval_sec} сек")
+        if restart_minutes > 0:
+            print(f"[bg] Рестарт Chromium каждые {restart_minutes} мин включён")
+        elif recycle_minutes > 0:
+            print(f"[bg] Лёгкая переразгрузка вкладки каждые {recycle_minutes} мин включена")
         deadline = time.monotonic() + bg_minutes * 60
         try:
             last_score_refresh = time.monotonic()
             next_recycle = (time.monotonic() + recycle_minutes * 60) if recycle_minutes > 0 else None
+            next_restart = (time.monotonic() + restart_minutes * 60) if restart_minutes > 0 else None
             while time.monotonic() < deadline and not stop_event.is_set():
                 if globals().get('_PAUSED', False):
                     print("[pause] Тик пропущен — режим Пауза")
@@ -1650,6 +1659,93 @@ def run(filters: List[str]) -> None:
                     continue
                 try:
                     page.evaluate("console.info('AUTO:bg tick')")
+                except Exception:
+                    pass
+                # Hard restart: close and relaunch Chromium context to reclaim memory
+                try:
+                    if next_restart and time.monotonic() >= next_restart:
+                        print("[bg] restart: перезапускаю Chromium для снижения памяти")
+                        # Close existing context/browser
+                        try:
+                            if context is not None:
+                                context.close()
+                        except Exception:
+                            pass
+                        try:
+                            br = globals().get('_GLOBAL_BROWSER')
+                            if br is not None:
+                                br.close()
+                        except Exception:
+                            pass
+                        # Relaunch according to mode (with/without extension)
+                        try:
+                            want_extension_r = want_extension
+                        except Exception:
+                            want_extension_r = False
+                        try:
+                            if want_extension_r:
+                                user_data_dir = os.path.join(os.path.dirname(__file__), ".chromium-profile")
+                                extra_args = []
+                                try:
+                                    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+                                        extra_args += ["--no-sandbox", "--disable-setuid-sandbox"]
+                                except Exception:
+                                    pass
+                                extra_args += ["--disable-dev-shm-usage"]
+                                args_list = [
+                                    f"--disable-extensions-except={ext_path}",
+                                    f"--load-extension={ext_path}",
+                                ] + extra_args
+                                context = p.chromium.launch_persistent_context(
+                                    user_data_dir,
+                                    headless=False,
+                                    args=args_list,
+                                )
+                                page = context.new_page() if len(context.pages) == 0 else context.pages[0]
+                            else:
+                                headless_flag = True
+                                try:
+                                    headless_flag = bool(getattr(args, 'headless', False) or os.getenv('AUTOBET_HEADLESS'))
+                                except Exception:
+                                    headless_flag = True
+                                browser = p.chromium.launch(headless=headless_flag, args=["--disable-dev-shm-usage"]) 
+                                storage = AUTH_STATE_PATH if os.path.exists(AUTH_STATE_PATH) else None
+                                context = browser.new_context(storage_state=storage)
+                                page = context.new_page()
+                                globals()['_GLOBAL_BROWSER'] = browser
+                            # restore perf/server init and router
+                            try:
+                                if perf_server:
+                                    context.add_init_script("try{ localStorage.setItem('__TSX_PERF','server'); window.__TSX_SERVER_MODE__=true; }catch(_){ }")
+                            except Exception:
+                                pass
+                            try:
+                                def _route_handler(route, request):
+                                    try:
+                                        rt = request.resource_type
+                                        if rt in ("image", "media", "font"):
+                                            return route.abort()
+                                    except Exception:
+                                        pass
+                                    return route.continue_()
+                                context.route("**/*", _route_handler)
+                            except Exception:
+                                pass
+                            # Go to live and restore filters
+                            page.goto(URL, wait_until="domcontentloaded", timeout=20000)
+                            try:
+                                ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                                excl = [s.strip() for s in ex_env.split(',') if s.strip()] if ex_env else None
+                            except Exception:
+                                excl = None
+                            excl = (excl or getattr(args, 'exclude', None) or []) + ALWAYS_EXCLUDED
+                            try:
+                                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, excl)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            print(f"[bg] restart warn: {e}")
+                        next_restart = time.monotonic() + restart_minutes * 60
                 except Exception:
                     pass
                 # Optional: recycle live tab to reduce memory
@@ -1812,6 +1908,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Как часто обновлять счёт между сканами, сек (по умолчанию 30)")
     parser.add_argument("--recycle-minutes", dest="recycle_minutes", type=int, default=0,
                         help="Переоткрывать вкладку live_v2 каждые N минут для снижения потребления памяти (0 = выкл)")
+    parser.add_argument("--restart-browser-minutes", dest="restart_browser_minutes", type=int, default=int(os.getenv('AUTOBET_RESTART_MINUTES') or 0),
+                        help="Полностью перезапускать Chromium каждые N минут (0 = выкл). Эффективнее при утечках памяти.")
     parser.add_argument("--processed-ttl", dest="processed_ttl", type=int, default=0,
                         help="Через сколько минут повторно открывать уже обработанные ссылки (0 = никогда в этом запуске)")
     parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
