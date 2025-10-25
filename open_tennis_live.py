@@ -1556,10 +1556,15 @@ def run(filters: List[str]) -> None:
         except Exception:
             score_interval_sec = 20
 
+        try:
+            recycle_minutes = int(getattr(args, 'recycle_minutes', 0) or 0)
+        except Exception:
+            recycle_minutes = 0
         print(f"[bg] Запуск фонового сканирования: {bg_minutes} мин, шаг {interval_sec} сек; обновление счёта каждые {score_interval_sec} сек")
         deadline = time.monotonic() + bg_minutes * 60
         try:
             last_score_refresh = time.monotonic()
+            next_recycle = (time.monotonic() + recycle_minutes * 60) if recycle_minutes > 0 else None
             while time.monotonic() < deadline and not stop_event.is_set():
                 if globals().get('_PAUSED', False):
                     print("[pause] Тик пропущен — режим Пауза")
@@ -1567,6 +1572,41 @@ def run(filters: List[str]) -> None:
                     continue
                 try:
                     page.evaluate("console.info('AUTO:bg tick')")
+                except Exception:
+                    pass
+                # Optional: recycle live tab to reduce memory
+                try:
+                    if next_recycle and time.monotonic() >= next_recycle:
+                        print("[bg] recycle: переоткрываю вкладку live_v2 для снижения памяти")
+                        try:
+                            for p_ in list(context.pages):
+                                try: p_.close()
+                                except Exception: pass
+                        except Exception:
+                            pass
+                        try:
+                            page = context.new_page()
+                            page.goto(URL, wait_until="domcontentloaded", timeout=20000)
+                            # восстановим фильтры через localStorage и, при необходимости, JS инъекцию
+                            try:
+                                ex_env = os.getenv('AUTOBET_EXCLUDE', '')
+                                excl = [s.strip() for s in ex_env.split(',') if s.strip()] if ex_env else None
+                            except Exception:
+                                excl = None
+                            excl = (excl or getattr(args, 'exclude', None) or []) + ALWAYS_EXCLUDED
+                            try:
+                                page.evaluate("(a,b)=>{ try{ localStorage.setItem('__AUTO_ALLOW', JSON.stringify(a||[])); localStorage.setItem('__AUTO_EXCLUDE', JSON.stringify(b||[])); }catch(_){ } }", filters or DEFAULT_FILTERS, excl)
+                            except Exception:
+                                pass
+                            try:
+                                unsafe_r = bool(getattr(args, 'unsafe', False) or (os.getenv('AUTOBET_UNSAFE') not in (None, '', '0', 'false', 'False')))
+                            except Exception:
+                                unsafe_r = False
+                            if unsafe_r:
+                                _apply_filter_to_all_frames(page, filters or DEFAULT_FILTERS, excl)
+                        except Exception as e:
+                            print(f"[bg] recycle warn: {e}")
+                        next_recycle = time.monotonic() + recycle_minutes * 60
                 except Exception:
                     pass
                 try:
@@ -1691,6 +1731,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bg-interval", dest="bg_interval", type=int, default=60, help="Интервал между пересканами, сек (по умолчанию 60)")
     parser.add_argument("--score-interval", dest="score_interval", type=int, default=30,
                         help="Как часто обновлять счёт между сканами, сек (по умолчанию 30)")
+    parser.add_argument("--recycle-minutes", dest="recycle_minutes", type=int, default=0,
+                        help="Переоткрывать вкладку live_v2 каждые N минут для снижения потребления памяти (0 = выкл)")
     parser.add_argument("--processed-ttl", dest="processed_ttl", type=int, default=0,
                         help="Через сколько минут повторно открывать уже обработанные ссылки (0 = никогда в этом запуске)")
     parser.add_argument("--tty-exit", dest="tty_exit", action="store_true",
