@@ -301,13 +301,14 @@ def _upsert_tg_message(url: str, text: str, finished: bool = False) -> None:
             return
         canon = _canonical_stats_url(url)
         mid = _TG_MSG_BY_URL.get(url) or _TG_MSG_BY_URL.get(canon)
-        # If nothing changed since last time, skip early to avoid duplicates
-        try:
-            old = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
-            if old and (old == text or (finished and (old == text or old == (text + "\n🏁 Игра завершена")))):
-                return
-        except Exception:
-            pass
+        # Skip only if we ALREADY have a message id and text hasn't changed
+        if mid:
+            try:
+                old = _LAST_TG_TEXT_BY_URL.get(url) or _LAST_TG_TEXT_BY_URL.get(canon)
+                if old and (old == text or (finished and (old == text or old == (text + "\n🏁 Игра завершена")))):
+                    return
+            except Exception:
+                pass
         _send = globals().get('_tg_send')
         _edit = globals().get('_tg_edit')
         if mid:
